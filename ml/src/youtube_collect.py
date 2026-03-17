@@ -137,7 +137,7 @@ def get_video_info(url: str) -> Optional[Dict]:
 def load_manual_urls(url_file: str) -> List[str]:
     """Load manually curated video URLs from a text file (one URL per line)."""
     urls = []
-    with open(url_file, "r") as f:
+    with open(url_file, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line and not line.startswith("#"):

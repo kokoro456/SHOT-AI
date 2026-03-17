@@ -186,7 +186,10 @@ def main():
         vid = video["id"]
         url = video["url"]
         title = video.get("title", "")[:50]
-        print(f"[{i+1}/{len(videos)}] {title}...")
+        try:
+            print(f"[{i+1}/{len(videos)}] {title}...")
+        except UnicodeEncodeError:
+            print(f"[{i+1}/{len(videos)}] {vid}...")
 
         # Download
         video_path = download_video(url, str(temp_video_dir), vid)
