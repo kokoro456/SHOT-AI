@@ -183,17 +183,80 @@ yastrebksv/TennisCourtDetector (MIT 라이선스):
 
 ---
 
+## 현재 진행 중: YouTube 데이터 수집 파이프라인
+
+### 배경
+
+현재 모델은 **방송 카메라 데이터**로만 학습되어 **핸드폰 카메라 환경에서 도메인 갭** 발생.
+이를 해결하기 위해 YouTube에서 동호인 테니스 영상(핸드폰/고정 카메라 촬영)을 수집하여
+학습 데이터를 보강하는 파이프라인을 구축.
+
+### 핵심 전략
+
+- **한 영상에서 많은 프레임이 아니라, 다양한 영상에서 각 1~3프레임** 추출
+- 고정 카메라 영상이라도 영상 수 자체가 다양성을 보장 (코트, 위치, 높이, 조명 모두 다름)
+- 200개 이상 영상에서 각 1장 = **200개 이상 고유 시점** 확보 가능
+- **자동화는 수집/추출까지만, 학습 데이터 승인은 반드시 수동 검수 후 진행**
+
+### 데이터 파이프라인 워크플로우
+
+```
+[Step 1: 자동] YouTube 검색 → URL 리스트 수집
+    python youtube_collect.py --output data/youtube/video_list.json
+    python youtube_collect.py --url-file data/youtube/manual_urls.txt --skip-search --output data/youtube/video_list.json
+
+[Step 2: 자동] 영상 다운로드 → 대표 프레임 추출
+    python extract_frames.py --input data/youtube/video_list.json --output data/youtube/frames
+
+[Step 3: 자동] 기존 모델로 키포인트 예측 → 미리보기 생성
+    python predict_and_preview.py --frames data/youtube/frames --model models/best_model.pth
+
+[Step 4: 수동] 사람이 직접 검수 (승인/거부)
+    python review_data.py --predictions data/youtube/predictions.json --preview-dir data/youtube/preview
+
+[Step 5: 학습] 검수 완료된 데이터만으로 fine-tune
+    python train.py --data data/youtube/approved_annotations.json --image-dir data/youtube/frames
+```
+
+### 추가된 스크립트 (`ml/src/`)
+
+| 파일 | 역할 |
+|------|------|
+| `youtube_collect.py` | YouTube 검색 + 수동 URL 수집 → video_list.json 생성 |
+| `extract_frames.py` | yt-dlp로 다운로드 + OpenCV로 대표 프레임 추출 |
+| `predict_and_preview.py` | 기존 모델로 키포인트 예측 + 시각적 미리보기 생성 |
+| `review_data.py` | 대화형 검수 도구 (승인/거부/스킵), approved_annotations.json 생성 |
+
+### 수동 URL 리스트
+
+`ml/data/youtube/manual_urls.txt`에 확인 완료된 5개 영상 URL 등록:
+- 아이언쑨 - 테슬로 복식 (14분)
+- 리서땡 - 혼복/잡복 귀뚜라미크린 (30분, 21분)
+- 몽돌브라더스 - 나눔귀뚜라미 (1시간56분, 4분)
+
+### 의존성 추가
+
+기존 `requirements.txt` 외 추가 설치 필요:
+```bash
+pip install yt-dlp opencv-python
+```
+
+---
+
 ## 남은 작업 (우선순위 순)
+
+### 데이터 수집 & 모델 개선 (현재 우선)
+- [ ] YouTube 자동 검색으로 200개 이상 영상 URL 수집
+- [ ] 프레임 추출 + 키포인트 예측 + 미리보기 생성
+- [ ] 수동 검수로 학습용 데이터 승인
+- [ ] 승인된 데이터로 모델 fine-tune
+- [ ] perspective 증강 강화하여 재학습
+- [ ] INT8 양자화 모델 생성 (현재 FP32 4.25MB → 목표 <5MB INT8)
 
 ### Phase 1C: 검출 파이프라인 통합
 - [ ] Android 빌드 성공 확인 (Android Studio에서)
 - [ ] 카메라 → 검출 → 호모그래피 → 투영 전체 파이프라인 연결
 - [ ] CameraViewModel에서 실시간 오케스트레이션
-
-### 모델 개선
-- [ ] 핸드폰 카메라 데이터 수집 (100~200장)
-- [ ] perspective 증강 강화하여 재학습
-- [ ] INT8 양자화 모델 생성 (현재 FP32 4.25MB → 목표 <5MB INT8)
 
 ### Phase 1D: UI 및 마무리
 - [ ] 코트 라인 오버레이 (Compose Canvas)
@@ -215,5 +278,6 @@ yastrebksv/TennisCourtDetector (MIT 라이선스):
 |------|------|
 | `2f25931` | Phase 1 초기 구현 (Android 스캐폴딩 + ML 파이프라인) |
 | `4b9fed9` | 학습된 TFLite 모델 추가 (4.25MB) |
+| `4eabb29` | Phase 1 인수인계 문서 추가 |
 
 **원격 저장소**: https://github.com/kokoro456/SHOT-AI
