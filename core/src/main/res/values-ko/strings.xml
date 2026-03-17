@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">SHOT</string>
+
+    <!-- Camera Screen -->
+    <string name="court_detected">코트 인식됨</string>
+    <string name="court_not_detected">코트를 인식할 수 없습니다</string>
+    <string name="court_partial">부분적으로 인식됨</string>
+    <string name="camera_guide_higher">카메라를 더 높이 올려주세요</string>
+    <string name="camera_guide_center">코트를 화면 중앙에 맞춰주세요</string>
+    <string name="camera_guide_no_ultrawide">울트라와이드 모드를 꺼주세요</string>
+    <string name="camera_guide_stable">카메라를 흔들리지 않게 고정해주세요</string>
+
+    <!-- Recording -->
+    <string name="start_recording">녹화 시작</string>
+    <string name="stop_recording">녹화 중지</string>
+    <string name="recording_in_progress">녹화 중…</string>
+
+    <!-- Settings -->
+    <string name="settings">설정</string>
+    <string name="camera_resolution">카메라 해상도</string>
+    <string name="model_mode">인식 모드</string>
+    <string name="model_mode_fast">빠른 모드</string>
+    <string name="model_mode_accurate">정확한 모드</string>
+    <string name="court_type">코트 유형</string>
+    <string name="singles">단식</string>
+    <string name="doubles">복식</string>
+    <string name="language">언어</string>
+    <string name="debug_mode">디버그 모드</string>
+
+    <!-- Permissions -->
+    <string name="camera_permission_required">코트 인식을 위해 카메라 권한이 필요합니다</string>
+    <string name="grant_permission">권한 허용</string>
+
+    <!-- Debug -->
+    <string name="debug_fps">FPS: %1$d</string>
+    <string name="debug_inference">추론: %1$d ms</string>
+    <string name="debug_reprojection_error">재투영 오차: %1$.1f px</string>
+    <string name="debug_keypoints">키포인트: %1$d / %2$d</string>
+</resources>

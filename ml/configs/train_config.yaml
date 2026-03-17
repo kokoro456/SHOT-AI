@@ -1,0 +1,53 @@
+# Training configuration for court keypoint detection model
+
+# Data
+data:
+  annotation_file: "data/raw/annotations.json"
+  image_dir: "data/raw/images"
+  input_size: 256
+  train_val_split: 0.8
+
+# Model
+model:
+  backbone: "mobilenet_v3_small"
+  pretrained: true
+  num_keypoints: 8
+  output_dim: 24  # 8 * (x, y, confidence)
+
+# Training
+training:
+  epochs: 100
+  batch_size: 32
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  scheduler: "cosine_annealing"
+  early_stopping_patience: 15
+  num_workers: 4
+
+# Loss weights
+loss:
+  coordinate_weight: 1.0
+  confidence_weight: 0.5
+  # Per-keypoint weights (baseline 1.5x, service 1.2x, doubles 1.0x)
+  keypoint_weights:
+    9: 1.2   # service line left
+    10: 1.2  # service line center
+    11: 1.2  # service line right
+    12: 1.0  # doubles sideline left
+    13: 1.5  # baseline left
+    14: 1.5  # baseline center mark
+    15: 1.5  # baseline right
+    16: 1.0  # doubles sideline right
+
+# Target accuracy (pixels on 256x256 input)
+targets:
+  baseline_keypoints_max_error: 2.0    # points 13, 14, 15
+  service_keypoints_max_error: 3.0     # points 9, 10, 11
+  doubles_keypoints_max_error: 4.0     # points 12, 16
+
+# Export
+export:
+  output_dir: "models"
+  fp32_max_size_mb: 10
+  int8_max_size_mb: 5
+  int8_accuracy_loss_max: 0.02  # 2%

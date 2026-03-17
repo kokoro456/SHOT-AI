@@ -1,0 +1,35 @@
+# Build outputs
+build/
+*.apk
+*.aab
+.gradle/
+local.properties
+
+# IDE
+.idea/
+*.iml
+
+# ML data and models (too large for git)
+ml/data/
+ml/models/
+ml/.venv312/
+ml/src/__pycache__/
+*.tflite
+*.onnx
+*.pth
+*.pt
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.eggs/
+dist/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+*.log
