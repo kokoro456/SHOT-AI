@@ -226,6 +226,10 @@ yastrebksv/TennisCourtDetector (MIT 라이선스):
 | `extract_frames.py` | yt-dlp로 다운로드 + OpenCV로 대표 프레임 추출 |
 | `predict_and_preview.py` | 기존 모델로 키포인트 예측 + 시각적 미리보기 생성 |
 | `review_data.py` | 대화형 검수 도구 (승인/거부/스킵), approved_annotations.json 생성 |
+| `labeling_tool.py` | 브라우저 기반 키포인트 라벨링 도구 (클릭으로 8포인트 지정) |
+| `sync_delete.py` | previews 폴더 삭제 → frames 폴더 자동 동기화 |
+| `train_compare.py` | 3가지 비교 실험 (방송/핸드폰/합산) 학습 + 결과 비교 |
+| `prepare_broadcast_data.py` | yastrebksv 방송 데이터 다운로드 + SHOT 포맷 변환 |
 
 ### 수동 URL 리스트
 
@@ -243,14 +247,35 @@ pip install yt-dlp opencv-python
 
 ---
 
+## 완료된 작업: YouTube 데이터 수집 & 라벨링 (2026-03-17)
+
+### 데이터 수집 결과
+- [x] YouTube 자동 검색으로 203개 영상 URL 수집 (11개 검색 쿼리)
+- [x] 프레임 추출: 203개 영상 → 622 프레임 추출
+- [x] 기존 모델로 키포인트 예측 + 미리보기 생성
+- [x] 수동 검수: 쓰레기 데이터 262장 삭제 → **360장** 선별
+- [x] **수동 키포인트 라벨링 완료**: 339장 (브라우저 기반 라벨링 도구 사용)
+
+### 라벨링 데이터 위치
+- 프레임 이미지: `ml/data/youtube/review/frames/` (360장)
+- 라벨 어노테이션: `ml/data/youtube/labeled_annotations.json` (339장)
+- 포맷: SHOT JSON (image, keypoints{9~16: {x, y, visible}})
+
+### 3가지 비교 실험 준비 완료 (학습 미실행)
+- **실험 A**: 방송 데이터만 (yastrebksv/TennisCourtDetector)
+- **실험 B**: 핸드폰 YouTube 데이터만 (339장 수동 라벨링)
+- **실험 C**: A + B 합친 데이터
+- 테스트: 3가지 모두 핸드폰 영상으로 평가하여 비교
+- 스크립트: `ml/src/train_compare.py`
+
+---
+
 ## 남은 작업 (우선순위 순)
 
-### 데이터 수집 & 모델 개선 (현재 우선)
-- [ ] YouTube 자동 검색으로 200개 이상 영상 URL 수집
-- [ ] 프레임 추출 + 키포인트 예측 + 미리보기 생성
-- [ ] 수동 검수로 학습용 데이터 승인
-- [ ] 승인된 데이터로 모델 fine-tune
-- [ ] perspective 증강 강화하여 재학습
+### 모델 학습 & 비교 (다음 단계)
+- [ ] 방송 데이터 다운로드 (`python src/prepare_broadcast_data.py`)
+- [ ] 3가지 비교 실험 실행 (`python src/train_compare.py`)
+- [ ] 최적 모델 선택 → TFLite 변환
 - [ ] INT8 양자화 모델 생성 (현재 FP32 4.25MB → 목표 <5MB INT8)
 
 ### Phase 1C: 검출 파이프라인 통합
@@ -279,5 +304,7 @@ pip install yt-dlp opencv-python
 | `2f25931` | Phase 1 초기 구현 (Android 스캐폴딩 + ML 파이프라인) |
 | `4b9fed9` | 학습된 TFLite 모델 추가 (4.25MB) |
 | `4eabb29` | Phase 1 인수인계 문서 추가 |
+| `62e58fc` | 키포인트 라벨링 도구 + TFLite 미리보기 생성기 |
+| `74bdb09` | YouTube 데이터 수집 파이프라인 추가 |
 
 **원격 저장소**: https://github.com/kokoro456/SHOT-AI
