@@ -14,8 +14,10 @@ ml/data/
 ml/models/
 ml/.venv312/
 ml/src/__pycache__/
-*.tflite
+ml/**/*.tflite
 *.onnx
+# Keep Android assets TFLite model
+!court-detection/src/main/assets/*.tflite
 *.pth
 *.pt
 
