@@ -272,8 +272,33 @@ pip install yt-dlp opencv-python
 
 ## 남은 작업 (우선순위 순)
 
-### 모델 학습 & 비교 (다음 단계)
-- [ ] 방송 데이터 다운로드 (`python src/prepare_broadcast_data.py`)
+### 모델 학습 & 비교 (다음 단계 - 집 데스크탑에서 실행)
+
+**데이터 위치:**
+- YouTube 라벨링 데이터: GitHub Release `v0.1-data` → [다운로드](https://github.com/kokoro456/SHOT-AI/releases/download/v0.1-data/youtube_labeled_data.zip)
+- 방송 데이터 (8,841장): [Google Drive](https://drive.google.com/file/d/1lhAaeQCmk2y440PmagA0KmIVBIysVMwu)
+
+**집 데스크탑 셋업 (한 줄로 끝):**
+```bash
+git clone https://github.com/kokoro456/SHOT-AI.git
+cd SHOT-AI/ml
+pip install torch torchvision albumentations pillow tqdm gdown
+python setup_training.py    # 데이터 자동 다운로드 + 변환
+```
+
+**학습 실행:**
+```bash
+python src/train_compare.py \
+  --broadcast-data data/broadcast/annotations_broadcast.json \
+  --broadcast-images data/broadcast/data/images \
+  --phone-data data/youtube/labeled_annotations.json \
+  --phone-images data/youtube/review/frames \
+  --epochs 100 --batch-size 32
+```
+
+**참고:** 회사 노트북(CPU)에서 실험 B(272장) 결과 = 22.84px 오차 (목표 2~4px 대비 매우 높음). GPU 환경에서 전체 실험 필요.
+
+- [ ] `python setup_training.py` 실행 (데이터 다운로드)
 - [ ] 3가지 비교 실험 실행 (`python src/train_compare.py`)
 - [ ] 최적 모델 선택 → TFLite 변환
 - [ ] INT8 양자화 모델 생성 (현재 FP32 4.25MB → 목표 <5MB INT8)
