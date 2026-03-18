@@ -285,32 +285,42 @@ pip install yt-dlp opencv-python
 
 ## 남은 작업 (우선순위 순)
 
-### 즉시: Google Colab에서 3단계 학습 실행
+### ✅ 완료: 히트맵 3-Stage 학습 (2026-03-18, Colab T4)
 
-**Colab 노트북**: `ml/colab_train_3stage.ipynb` (repo에 포함)
+**최종 결과: 평균 오차 2.41px** 🎯 (목표 2~4px 달성!)
 
-**사전 준비:**
-1. `ml/data/youtube/youtube_labeled_data.zip` (26MB)을 Google Drive의 `SHOT-AI/` 폴더에 업로드
-2. Colab에서 노트북 열기 → Runtime > T4 GPU 선택 → 순서대로 실행
-3. 방송 데이터(7.3GB)는 Colab에서 자동 다운로드됨
+| Stage | 내용 | 오차(px) |
+|-------|------|----------|
+| Stage 1 | Broadcast 8,841장 pretrain | 13.86 |
+| Stage 2 | Mixed 50:50 oversampling | **2.41** ⭐ |
+| Stage 3 | Phone 272장 fine-tune | 2.48 |
 
-**3단계 학습 전략:**
-- Stage 1: 방송 8,841장으로 pretrain (코트 기하 구조 학습)
-- Stage 2: 방송 + 핸드폰 혼합 (50:50 오버샘플링)
-- Stage 3: 핸드폰 272장만으로 fine-tune (낮은 LR)
+- Stage 2 모델이 최적 (Stage 3은 데이터 부족으로 미세 과적합)
+- 시각화 검증: 랜덤 20장 평균 1.67px, 중앙값 1.62px
+- 모델 저장: Google Drive `SHOT-AI/models/heatmap_stage2_best.pth`
 
-**데이터 위치:**
-- YouTube 라벨링 데이터 (339장): `ml/data/youtube/youtube_labeled_data.zip`
-- 방송 데이터 (8,841장): [Google Drive](https://drive.google.com/file/d/1lhAaeQCmk2y440PmagA0KmIVBIysVMwu) (Colab에서 자동 다운로드)
+**Colab 학습 시 주의사항:**
+- broadcast 이미지는 256x256 JPEG로 전처리하면 에폭당 600초→90초로 단축
+- `NUM_WORKERS=2` (Colab 권장), `BATCH_SIZE=64`, `pin_memory=True`
+- gdown 대신 Google Drive에서 직접 복사 (rate limit 회피)
 
-### 데이터 추가 확보 (병렬 진행)
+### 즉시: Android 앱 통합
+
+1. 히트맵 모델 TFLite 변환 (`export_tflite.py` 히트맵용 수정 필요)
+2. `CourtKeypointDetector.kt` 히트맵 출력 파싱 수정 (기존: [1,24] → 신규: [1,8,64,64])
+3. 카메라 → 검출 → 호모그래피 → 투영 전체 파이프라인 연결
+
+### 📌 나중에: 데이터 추가 확보 (현재 보류)
+> 현재 2.41px로 목표 달성. 추가 데이터 수집은 Android 통합 후 실제 사용에서
+> 부족함이 느껴질 때 진행. Stage 3 과적합 해결을 위해 최소 1,000장 필요.
+
 - [ ] YouTube 영상 추가 수집 → 1,000장+ 목표
-- [ ] 라벨링 도구에 모델 예측 보조 기능 추가 (시간 절약)
-- [ ] Optical flow 기반 라벨 자동 전파 구현
+- [ ] 라벨링 도구에 모델 예측 보조 기능 추가 (이제 모델이 정확하므로 효율적)
+- [ ] 수집 후 전체 데이터로 처음부터 재학습 (이어서 학습 X)
 
-### 추가 실험 후
-- [ ] 최적 모델 선택 → TFLite 변환
-- [ ] INT8 양자화 모델 생성 (현재 FP32 4.25MB → 목표 <5MB INT8)
+### TFLite 변환
+- [ ] 히트맵 모델용 export_tflite.py 수정
+- [ ] INT8 양자화 검토 (현재 FP32 → 모바일 속도 개선용)
 
 ### Phase 1C: 검출 파이프라인 통합
 - [ ] Android 빌드 성공 확인 (Android Studio에서)
@@ -351,8 +361,9 @@ pip install yt-dlp opencv-python
 자세한 실패 분석 및 교훈은 `docs/RETROSPECTIVE.md` 참조.
 
 **핵심 요약:**
-1. FC direct regression은 공간 정보 손실 → 히트맵 기반으로 변경
-2. 339장은 부족 → 최소 1,000장 필요
+1. FC direct regression은 공간 정보 손실 → 히트맵 기반으로 변경 → **2.41px 달성!**
+2. 339장으로도 3-stage 전략 덕분에 목표 달성, 하지만 Stage 3 과적합 → 1,000장 이상 시 추가 개선 가능
 3. 단순 합산보다 3단계 학습 (pretrain → mixed → fine-tune)
 4. soft-argmax 함정: 평평한 히트맵에서 중심(0.5,0.5)으로 수렴 → argmax 사용
 5. 테스트는 반드시 타겟 도메인(핸드폰)으로
+6. Colab에서 broadcast 이미지 전처리(256x256 JPEG) 필수 → 6배 속도 향상
