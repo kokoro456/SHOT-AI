@@ -22,6 +22,10 @@ import time
 from pathlib import Path
 from copy import deepcopy
 
+# Force unbuffered output
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
@@ -112,17 +116,19 @@ def evaluate(model, dataloader, device):
 def train_experiment(name, train_dataset, val_dataset, output_dir, device,
                      epochs=100, batch_size=32, lr=1e-3, patience=15):
     """Run a single training experiment."""
-    print(f"\n{'='*60}")
-    print(f"  EXPERIMENT {name}")
-    print(f"  Train: {len(train_dataset)} images, Val: {len(val_dataset)} images")
-    print(f"{'='*60}\n")
+    print(f"\n{'='*60}", flush=True)
+    print(f"  EXPERIMENT {name}", flush=True)
+    print(f"  Train: {len(train_dataset)} images, Val: {len(val_dataset)} images", flush=True)
+    print(f"{'='*60}\n", flush=True)
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    print(f"  DataLoader ready. {len(train_loader)} train batches, {len(val_loader)} val batches", flush=True)
 
     model = create_model(pretrained=True).to(device)
     optimizer = AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     scheduler = CosineAnnealingLR(optimizer, T_max=epochs)
+    print(f"  Model on {device}, starting training...", flush=True)
 
     os.makedirs(output_dir, exist_ok=True)
     best_val_loss = float("inf")
@@ -145,7 +151,7 @@ def train_experiment(name, train_dataset, val_dataset, output_dir, device,
         })
 
         if (epoch + 1) % 10 == 0 or epoch == 0:
-            print(f"  Epoch {epoch+1:3d} | Train: {train_loss:.4f} | Val: {val_loss:.4f} | Mean: {mean_error:.2f}px")
+            print(f"  Epoch {epoch+1:3d} | Train: {train_loss:.4f} | Val: {val_loss:.4f} | Mean: {mean_error:.2f}px", flush=True)
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -203,6 +209,8 @@ def main():
                         help="Ratio of phone data to hold out for testing")
     parser.add_argument("--experiments", type=str, default="A,B,C",
                         help="Comma-separated experiments to run (A,B,C)")
+    parser.add_argument("--max-broadcast", type=int, default=0,
+                        help="Max broadcast images to use (0=all)")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -250,7 +258,10 @@ def main():
             image_dir=str(broadcast_images_path),
             input_size=256,
         )
-        print(f"Broadcast dataset: {len(broadcast_full)} images")
+        if args.max_broadcast > 0 and len(broadcast_full) > args.max_broadcast:
+            indices = torch.randperm(len(broadcast_full), generator=torch.Generator().manual_seed(42))[:args.max_broadcast]
+            broadcast_full = Subset(broadcast_full, indices.tolist())
+        print(f"Broadcast dataset: {len(broadcast_full)} images", flush=True)
     else:
         print(f"WARNING: Broadcast data not found at {broadcast_data_path}")
         print("Skipping Experiment A and C (broadcast-dependent)")

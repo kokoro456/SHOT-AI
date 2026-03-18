@@ -1,6 +1,6 @@
 # SHOT Phase 1 인수인계 문서
 
-> 최종 업데이트: 2026-03-17
+> 최종 업데이트: 2026-03-18
 
 ## 프로젝트 개요
 
@@ -230,6 +230,9 @@ yastrebksv/TennisCourtDetector (MIT 라이선스):
 | `sync_delete.py` | previews 폴더 삭제 → frames 폴더 자동 동기화 |
 | `train_compare.py` | 3가지 비교 실험 (방송/핸드폰/합산) 학습 + 결과 비교 |
 | `prepare_broadcast_data.py` | yastrebksv 방송 데이터 다운로드 + SHOT 포맷 변환 |
+| `model_heatmap.py` | **히트맵 기반 키포인트 검출 모델** (MobileNetV3 + decoder) |
+| `augmentations_v2.py` | 강한 도메인 갭 축소 augmentation (perspective, 광각, blur 등) |
+| `train_3stage.py` | 3단계 학습 파이프라인 (pretrain → mixed → fine-tune) |
 
 ### 수동 URL 리스트
 
@@ -261,45 +264,51 @@ pip install yt-dlp opencv-python
 - 라벨 어노테이션: `ml/data/youtube/labeled_annotations.json` (339장)
 - 포맷: SHOT JSON (image, keypoints{9~16: {x, y, visible}})
 
-### 3가지 비교 실험 준비 완료 (학습 미실행)
-- **실험 A**: 방송 데이터만 (yastrebksv/TennisCourtDetector)
-- **실험 B**: 핸드폰 YouTube 데이터만 (339장 수동 라벨링)
-- **실험 C**: A + B 합친 데이터
-- 테스트: 3가지 모두 핸드폰 영상으로 평가하여 비교
-- 스크립트: `ml/src/train_compare.py`
+### 3가지 비교 실험 (FC regression, 2026-03-18 실행)
+
+| 실험 | 학습 데이터 | 핸드폰 테스트 오차 | 비고 |
+|-----|-----------|-----------------|------|
+| A: 방송만 | 1,000장 | 37.06px | 도메인 갭 확인 |
+| B: 핸드폰만 | 272장 | 24.03px | 데이터 부족 |
+| C: 합산 | 1,272장 | 24.95px | 단순 합산 비효과적 |
+
+**결론**: FC regression으로는 목표(2~4px) 달성 불가. 아키텍처 변경 필요.
+
+### 아키텍처 변경: 히트맵 기반 모델 (2026-03-18)
+
+- `model_heatmap.py`: MobileNetV3-Small + ConvTranspose2d decoder → 8채널 64x64 히트맵
+- soft-argmax 버그 발견 → argmax + sub-pixel refinement로 수정 (81px → 1.34px)
+- Stage 1 (방송 2000장 pretrain) 에폭 10에서 27px까지 감소 확인
+- **회사 노트북 GPU(RTX 2070 Super) 불안정** → Google Colab으로 전환
 
 ---
 
 ## 남은 작업 (우선순위 순)
 
-### 모델 학습 & 비교 (다음 단계 - 집 데스크탑에서 실행)
+### 즉시: Google Colab에서 3단계 학습 실행
+
+**Colab 노트북**: `ml/colab_train_3stage.ipynb` (repo에 포함)
+
+**사전 준비:**
+1. `ml/data/youtube/youtube_labeled_data.zip` (26MB)을 Google Drive의 `SHOT-AI/` 폴더에 업로드
+2. Colab에서 노트북 열기 → Runtime > T4 GPU 선택 → 순서대로 실행
+3. 방송 데이터(7.3GB)는 Colab에서 자동 다운로드됨
+
+**3단계 학습 전략:**
+- Stage 1: 방송 8,841장으로 pretrain (코트 기하 구조 학습)
+- Stage 2: 방송 + 핸드폰 혼합 (50:50 오버샘플링)
+- Stage 3: 핸드폰 272장만으로 fine-tune (낮은 LR)
 
 **데이터 위치:**
-- YouTube 라벨링 데이터: GitHub Release `v0.1-data` → [다운로드](https://github.com/kokoro456/SHOT-AI/releases/download/v0.1-data/youtube_labeled_data.zip)
-- 방송 데이터 (8,841장): [Google Drive](https://drive.google.com/file/d/1lhAaeQCmk2y440PmagA0KmIVBIysVMwu)
+- YouTube 라벨링 데이터 (339장): `ml/data/youtube/youtube_labeled_data.zip`
+- 방송 데이터 (8,841장): [Google Drive](https://drive.google.com/file/d/1lhAaeQCmk2y440PmagA0KmIVBIysVMwu) (Colab에서 자동 다운로드)
 
-**집 데스크탑 셋업 (한 줄로 끝):**
-```bash
-git clone https://github.com/kokoro456/SHOT-AI.git
-cd SHOT-AI/ml
-pip install torch torchvision albumentations pillow tqdm gdown
-python setup_training.py    # 데이터 자동 다운로드 + 변환
-```
+### 데이터 추가 확보 (병렬 진행)
+- [ ] YouTube 영상 추가 수집 → 1,000장+ 목표
+- [ ] 라벨링 도구에 모델 예측 보조 기능 추가 (시간 절약)
+- [ ] Optical flow 기반 라벨 자동 전파 구현
 
-**학습 실행:**
-```bash
-python src/train_compare.py \
-  --broadcast-data data/broadcast/annotations_broadcast.json \
-  --broadcast-images data/broadcast/data/images \
-  --phone-data data/youtube/labeled_annotations.json \
-  --phone-images data/youtube/review/frames \
-  --epochs 100 --batch-size 32
-```
-
-**참고:** 회사 노트북(CPU)에서 실험 B(272장) 결과 = 22.84px 오차 (목표 2~4px 대비 매우 높음). GPU 환경에서 전체 실험 필요.
-
-- [ ] `python setup_training.py` 실행 (데이터 다운로드)
-- [ ] 3가지 비교 실험 실행 (`python src/train_compare.py`)
+### 추가 실험 후
 - [ ] 최적 모델 선택 → TFLite 변환
 - [ ] INT8 양자화 모델 생성 (현재 FP32 4.25MB → 목표 <5MB INT8)
 
@@ -331,5 +340,19 @@ python src/train_compare.py \
 | `4eabb29` | Phase 1 인수인계 문서 추가 |
 | `62e58fc` | 키포인트 라벨링 도구 + TFLite 미리보기 생성기 |
 | `74bdb09` | YouTube 데이터 수집 파이프라인 추가 |
+| (다음) | 히트맵 모델 + 3단계 학습 + 오답노트 + Colab 노트북 |
 
 **원격 저장소**: https://github.com/kokoro456/SHOT-AI
+
+---
+
+## 오답노트
+
+자세한 실패 분석 및 교훈은 `docs/RETROSPECTIVE.md` 참조.
+
+**핵심 요약:**
+1. FC direct regression은 공간 정보 손실 → 히트맵 기반으로 변경
+2. 339장은 부족 → 최소 1,000장 필요
+3. 단순 합산보다 3단계 학습 (pretrain → mixed → fine-tune)
+4. soft-argmax 함정: 평평한 히트맵에서 중심(0.5,0.5)으로 수렴 → argmax 사용
+5. 테스트는 반드시 타겟 도메인(핸드폰)으로
