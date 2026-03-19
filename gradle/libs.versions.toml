@@ -4,8 +4,7 @@ agp = "8.7.3"
 composeBom = "2024.12.01"
 composeCompiler = "1.5.15"
 cameraX = "1.4.1"
-tensorflowLite = "2.16.1"
-tfliteSupport = "0.4.4"
+onnxruntime = "1.17.0"
 hilt = "2.51.1"
 coroutines = "1.8.1"
 lifecycle = "2.8.7"
@@ -39,10 +38,8 @@ camerax-lifecycle = { group = "androidx.camera", name = "camera-lifecycle", vers
 camerax-view = { group = "androidx.camera", name = "camera-view", version.ref = "cameraX" }
 camerax-video = { group = "androidx.camera", name = "camera-video", version.ref = "cameraX" }
 
-# TensorFlow Lite
-tflite = { group = "org.tensorflow", name = "tensorflow-lite", version.ref = "tensorflowLite" }
-tflite-gpu = { group = "org.tensorflow", name = "tensorflow-lite-gpu", version.ref = "tensorflowLite" }
-tflite-support = { group = "org.tensorflow", name = "tensorflow-lite-support", version.ref = "tfliteSupport" }
+# ONNX Runtime
+onnxruntime-android = { group = "com.microsoft.onnxruntime", name = "onnxruntime-android", version.ref = "onnxruntime" }
 
 # Hilt
 hilt-android = { group = "com.google.dagger", name = "hilt-android", version.ref = "hilt" }

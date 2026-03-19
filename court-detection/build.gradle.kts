@@ -21,19 +21,17 @@ android {
         jvmTarget = "17"
     }
 
-    // Don't compress TFLite model files
+    // Don't compress ONNX model files
     androidResources {
-        noCompress += "tflite"
+        noCompress += "onnx"
     }
 }
 
 dependencies {
     implementation(project(":core"))
 
-    // TensorFlow Lite
-    implementation(libs.tflite)
-    implementation(libs.tflite.gpu)
-    implementation(libs.tflite.support)
+    // ONNX Runtime
+    implementation(libs.onnxruntime.android)
 
     // Coroutines
     implementation(libs.coroutines.core)

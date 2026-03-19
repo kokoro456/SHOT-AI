@@ -2,26 +2,28 @@ package com.shot.detection
 
 import android.content.Context
 import android.graphics.Bitmap
+import ai.onnxruntime.OnnxTensor
+import ai.onnxruntime.OrtEnvironment
+import ai.onnxruntime.OrtSession
 import com.shot.core.model.Keypoint
-import org.tensorflow.lite.Interpreter
-import org.tensorflow.lite.support.common.FileUtil
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
+import java.nio.FloatBuffer
 
 /**
- * Detects tennis court keypoints using a TFLite model.
+ * Detects tennis court keypoints using an ONNX Runtime model.
  *
- * Loads the court_keypoint.tflite model from assets and runs inference
+ * Loads the court_keypoint_v2.onnx model from assets and runs inference
  * on camera frames to detect 8 keypoints (points 9-16) on the near court.
+ *
+ * Input:  NCHW [1, 3, 256, 256] float32, ImageNet normalized
+ * Output: [1, 24] float32 — 8x coords, 8y coords, 8 confidence values
  */
 class CourtKeypointDetector(context: Context) {
 
     companion object {
-        private const val MODEL_FILE = "court_keypoint.tflite"
+        private const val MODEL_FILE = "court_keypoint_v2.onnx"
         private const val INPUT_SIZE = 256
         private const val NUM_KEYPOINTS = 8
         private const val OUTPUT_SIZE = NUM_KEYPOINTS * 3 // x, y, confidence
-        private const val NUM_THREADS = 4
 
         // ImageNet normalization constants
         private val MEAN = floatArrayOf(0.485f, 0.456f, 0.406f)
@@ -31,24 +33,24 @@ class CourtKeypointDetector(context: Context) {
         private val KEYPOINT_IDS = intArrayOf(9, 10, 11, 12, 13, 14, 15, 16)
     }
 
-    private val interpreter: Interpreter
-    private val inputBuffer: ByteBuffer
-    private val outputBuffer: ByteBuffer
+    private val ortEnv: OrtEnvironment = OrtEnvironment.getEnvironment()
+    private val session: OrtSession
+    private val inputName: String
 
     init {
-        val model = FileUtil.loadMappedFile(context, MODEL_FILE)
-        val options = Interpreter.Options().apply {
-            numThreads = NUM_THREADS
+        val modelBytes = context.assets.open(MODEL_FILE).use { it.readBytes() }
+        val sessionOptions = OrtSession.SessionOptions().apply {
+            setIntraOpNumThreads(4)
         }
-        interpreter = Interpreter(model, options)
-
-        // Allocate buffers (NHWC format: 1 × H × W × 3)
-        inputBuffer = ByteBuffer.allocateDirect(1 * INPUT_SIZE * INPUT_SIZE * 3 * 4)
-        inputBuffer.order(ByteOrder.nativeOrder())
-
-        outputBuffer = ByteBuffer.allocateDirect(1 * OUTPUT_SIZE * 4)
-        outputBuffer.order(ByteOrder.nativeOrder())
+        session = ortEnv.createSession(modelBytes, sessionOptions)
+        inputName = session.inputNames.first()
     }
+
+    /**
+     * Get the inference time of the last detection (for debug display).
+     */
+    var lastInferenceTimeMs: Long = 0
+        private set
 
     /**
      * Detect keypoints from a camera frame bitmap.
@@ -61,63 +63,72 @@ class CourtKeypointDetector(context: Context) {
     fun detect(bitmap: Bitmap, imageWidth: Int, imageHeight: Int): List<Keypoint> {
         val startTime = System.nanoTime()
 
-        // Preprocess
+        // Preprocess: resize and convert to NCHW float buffer
         val resized = Bitmap.createScaledBitmap(bitmap, INPUT_SIZE, INPUT_SIZE, true)
-        preprocessBitmap(resized, inputBuffer)
+        val inputData = preprocessBitmap(resized)
 
-        // Inference
-        outputBuffer.rewind()
-        interpreter.run(inputBuffer, outputBuffer)
+        // Create ONNX tensor with NCHW shape [1, 3, 256, 256]
+        val shape = longArrayOf(1, 3, INPUT_SIZE.toLong(), INPUT_SIZE.toLong())
+        val inputTensor = OnnxTensor.createTensor(ortEnv, FloatBuffer.wrap(inputData), shape)
 
-        // Postprocess
-        val keypoints = parseOutput(outputBuffer, imageWidth, imageHeight)
+        // Run inference
+        val results = session.run(mapOf(inputName to inputTensor))
 
-        val elapsed = (System.nanoTime() - startTime) / 1_000_000
+        // Parse output
+        val outputTensor = results[0] as OnnxTensor
+        val outputValues = outputTensor.floatBuffer
+        val values = FloatArray(OUTPUT_SIZE)
+        outputValues.get(values)
+
+        val keypoints = parseOutput(values, imageWidth, imageHeight)
+
+        // Cleanup
+        outputTensor.close()
+        inputTensor.close()
+        results.close()
+
+        lastInferenceTimeMs = (System.nanoTime() - startTime) / 1_000_000
         return keypoints
     }
 
     /**
-     * Get the inference time of the last detection (for debug display).
-     */
-    var lastInferenceTimeMs: Long = 0
-        private set
-
-    /**
      * Convert a bitmap to the model input format.
-     * NHWC format (TFLite convention), ImageNet normalized, float32.
+     * NCHW format (channels first), ImageNet normalized, float32.
+     *
+     * Layout: all R values for every pixel, then all G, then all B.
      */
-    private fun preprocessBitmap(bitmap: Bitmap, buffer: ByteBuffer) {
-        buffer.rewind()
+    private fun preprocessBitmap(bitmap: Bitmap): FloatArray {
         val pixels = IntArray(INPUT_SIZE * INPUT_SIZE)
         bitmap.getPixels(pixels, 0, INPUT_SIZE, 0, 0, INPUT_SIZE, INPUT_SIZE)
 
-        // Convert to NHWC float32 with ImageNet normalization
-        // Pixel order: for each pixel, write R, G, B channels sequentially
+        val numPixels = INPUT_SIZE * INPUT_SIZE
+        val data = FloatArray(3 * numPixels)
+
         for (i in pixels.indices) {
             val pixel = pixels[i]
             val r = (pixel shr 16 and 0xFF) / 255f
             val g = (pixel shr 8 and 0xFF) / 255f
             val b = (pixel and 0xFF) / 255f
-            buffer.putFloat((r - MEAN[0]) / STD[0])
-            buffer.putFloat((g - MEAN[1]) / STD[1])
-            buffer.putFloat((b - MEAN[2]) / STD[2])
+
+            // NCHW: channel 0 (R) at offset 0, channel 1 (G) at numPixels, channel 2 (B) at 2*numPixels
+            data[i] = (r - MEAN[0]) / STD[0]
+            data[numPixels + i] = (g - MEAN[1]) / STD[1]
+            data[2 * numPixels + i] = (b - MEAN[2]) / STD[2]
         }
+
+        return data
     }
 
     /**
-     * Parse model output buffer into Keypoint objects.
-     * Output format: [x0, y0, conf0, x1, y1, conf1, ...] (24 float values)
+     * Parse model output into Keypoint objects.
+     * Output format: [x0..x7, y0..y7, conf0..conf7] (24 float values)
      * x, y are normalized [0, 1], confidence is [0, 1] (sigmoid activated in model)
      */
-    private fun parseOutput(buffer: ByteBuffer, imageWidth: Int, imageHeight: Int): List<Keypoint> {
-        buffer.rewind()
-        val values = FloatArray(OUTPUT_SIZE)
-        buffer.asFloatBuffer().get(values)
-
+    private fun parseOutput(values: FloatArray, imageWidth: Int, imageHeight: Int): List<Keypoint> {
         return (0 until NUM_KEYPOINTS).map { i ->
-            val x = values[i * 3] * imageWidth       // scale to image width
-            val y = values[i * 3 + 1] * imageHeight  // scale to image height
-            val confidence = values[i * 3 + 2]
+            val x = values[i] * imageWidth                    // x coords at indices 0-7
+            val y = values[NUM_KEYPOINTS + i] * imageHeight    // y coords at indices 8-15
+            val confidence = values[2 * NUM_KEYPOINTS + i]     // confidence at indices 16-23
 
             Keypoint(
                 id = KEYPOINT_IDS[i],
@@ -129,6 +140,6 @@ class CourtKeypointDetector(context: Context) {
     }
 
     fun close() {
-        interpreter.close()
+        session.close()
     }
 }
