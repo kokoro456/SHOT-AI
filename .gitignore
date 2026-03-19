@@ -11,6 +11,9 @@ local.properties
 
 # ML data and models (too large for git)
 ml/data/
+!ml/data/sntc/annotations.json
+!ml/data/sntc/selected_annotations.json
+!ml/data/youtube/labeled_annotations.json
 ml/models/
 ml/.venv312/
 ml/src/__pycache__/

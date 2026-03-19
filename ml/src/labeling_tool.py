@@ -207,6 +207,25 @@ async function init() {
     loadImage();
 }
 
+function getVideoId(filename) {
+    // Extract video ID: "videoId_frame_000.jpg" -> "videoId"
+    const match = filename.match(/^(.+)_frame_\\d+/);
+    return match ? match[1] : filename;
+}
+
+function findGroupLabel(filename) {
+    // Find label from same video group (e.g., frame_000 label for frame_001)
+    const videoId = getVideoId(filename);
+    for (const [name, kps] of Object.entries(annotations)) {
+        if (getVideoId(name) === videoId && name !== filename) {
+            return JSON.parse(JSON.stringify(kps));
+        }
+    }
+    return null;
+}
+
+let copiedFromGroup = false;
+
 function loadImage() {
     if (images.length === 0) return;
 
@@ -215,17 +234,28 @@ function loadImage() {
         canvas.width = img.naturalWidth;
         canvas.height = img.naturalHeight;
         scale = 1; offsetX = 0; offsetY = 0;
+        canvas.style.transform = '';
         redraw();
     };
     img.src = '/frames/' + filename;
+
+    copiedFromGroup = false;
 
     // Load existing annotation or start fresh
     if (annotations[filename]) {
         currentPoints = JSON.parse(JSON.stringify(annotations[filename]));
         currentKpIdx = 8; // All done
     } else {
-        currentPoints = {};
-        currentKpIdx = 0;
+        // Try to copy from same video group
+        const groupLabel = findGroupLabel(filename);
+        if (groupLabel) {
+            currentPoints = groupLabel;
+            currentKpIdx = 8;
+            copiedFromGroup = true;
+        } else {
+            currentPoints = {};
+            currentKpIdx = 0;
+        }
     }
 
     updateUI();
@@ -444,6 +474,8 @@ function updateUI() {
     if (currentKpIdx < 8) {
         const nextKp = kpIds[currentKpIdx];
         setStatus(`Click to place Pt${nextKp}: ${KEYPOINTS[nextKp]}`, 'info');
+    } else if (copiedFromGroup) {
+        setStatus('Copied from same video. Check & press Enter to save.', 'warning');
     } else {
         setStatus('All 8 keypoints placed. Press Enter to save.', 'warning');
     }
