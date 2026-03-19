@@ -36,6 +36,7 @@ from torch.utils.data import Dataset, DataLoader
 from PIL import Image
 
 from model_tracknet import TrackNet, TrackNetLoss, generate_heatmap
+from augmentations_ball import BallAugmentor
 
 
 class TrackNetDataset(Dataset):
@@ -53,6 +54,7 @@ class TrackNetDataset(Dataset):
     def __init__(self, annotations, frames_dir, augment=False):
         self.frames_dir = Path(frames_dir)
         self.augment = augment
+        self.augmentor = BallAugmentor("train") if augment else BallAugmentor("val")
 
         # Group by video
         video_frames = defaultdict(list)
@@ -121,18 +123,9 @@ class TrackNetDataset(Dataset):
         )
 
     def _augment(self, img, heatmap):
-        """Simple augmentations that preserve ball position."""
-        # Random brightness
-        if np.random.random() < 0.5:
-            factor = np.random.uniform(0.7, 1.3)
-            img = np.clip(img * factor, 0, 1)
-
-        # Random horizontal flip
-        if np.random.random() < 0.5:
-            img = np.flip(img, axis=2).copy()  # flip W
-            heatmap = torch.flip(heatmap, [1])  # flip W
-
-        return img, heatmap
+        """Apply augmentations using BallAugmentor."""
+        img, hm = self.augmentor(img, heatmap.numpy())
+        return img, torch.from_numpy(hm).float()
 
 
 def train_one_epoch(model, dataloader, criterion, optimizer, device):
@@ -229,14 +222,28 @@ def main():
     visible = sum(1 for a in all_annotations if a["visibility"] > 0)
     print(f"Visible balls: {visible}, Not visible: {len(all_annotations) - visible}")
 
-    # Train/val split (80/20)
-    np.random.seed(42)
-    indices = np.random.permutation(len(all_annotations))
-    split = int(len(indices) * 0.8)
-    train_ann = [all_annotations[i] for i in indices[:split]]
-    val_ann = [all_annotations[i] for i in indices[split:]]
+    # Video-level split (prevent data leakage)
+    video_frames = defaultdict(list)
+    for ann in all_annotations:
+        name = Path(ann["image"]).stem
+        match = re.match(r"(.+?)_frame_\d+$", name)
+        vid_id = match.group(1) if match else name
+        video_frames[vid_id].append(ann)
 
-    print(f"Train: {len(train_ann)}, Val: {len(val_ann)}")
+    video_ids = sorted(video_frames.keys())
+    np.random.seed(42)
+    np.random.shuffle(video_ids)
+    split_idx = max(1, int(len(video_ids) * 0.8))
+
+    train_ann = []
+    for vid in video_ids[:split_idx]:
+        train_ann.extend(video_frames[vid])
+    val_ann = []
+    for vid in video_ids[split_idx:]:
+        val_ann.extend(video_frames[vid])
+
+    print(f"Videos: {len(video_ids)} total, {split_idx} train, {len(video_ids) - split_idx} val")
+    print(f"Frames: {len(train_ann)} train, {len(val_ann)} val")
 
     # Datasets
     train_dataset = TrackNetDataset(train_ann, args.frames, augment=True)
@@ -274,6 +281,9 @@ def main():
     print(f"\n{'Epoch':>5} | {'Train Loss':>10} | {'Train Acc':>9} | {'Val Loss':>10} | {'Val Acc':>8} | {'Val Err':>7} | {'LR':>10}")
     print("-" * 80)
 
+    patience = 15
+    no_improve = 0
+
     for epoch in range(start_epoch, args.epochs):
         train_loss, train_acc = train_one_epoch(
             model, train_loader, criterion, optimizer, device
@@ -289,6 +299,7 @@ def main():
         # Save best model
         if val_loss < best_val_loss:
             best_val_loss = val_loss
+            no_improve = 0
             torch.save({
                 "model": model.state_dict(),
                 "optimizer": optimizer.state_dict(),
@@ -296,6 +307,11 @@ def main():
                 "best_val_loss": best_val_loss,
             }, os.path.join(args.output_dir, "tracknet_best.pth"))
             print(f"  → Saved best model (val_loss={val_loss:.6f})")
+        else:
+            no_improve += 1
+            if no_improve >= patience:
+                print(f"\nEarly stopping at epoch {epoch} (patience={patience})")
+                break
 
         # Save periodic checkpoint
         if (epoch + 1) % 10 == 0:

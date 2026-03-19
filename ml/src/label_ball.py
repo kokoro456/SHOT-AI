@@ -146,9 +146,10 @@ body { background: #1a1a2e; color: #eee; font-family: 'Segoe UI', sans-serif; ov
             <strong>Enter</strong> = save & next frame<br>
             <strong>A/D</strong> = prev/next | <strong>C</strong> = clear<br>
             <strong>S</strong> = skip without saving<br>
+            <strong>G/H</strong> = prev/next video group<br>
             <strong>Scroll</strong> = zoom in/out<br><br>
-            <em>Tip: Same video = camera is fixed,<br>
-            ball moves between frames</em>
+            <em>Blue dashed circle = prev frame ball<br>
+            Same video = camera is fixed</em>
         </div>
     </div>
 </div>
@@ -161,6 +162,8 @@ let ballPos = null; // {x, y, visibility}
 let img = new Image();
 let canvas, ctx;
 let scale = 1;
+let videoGroups = {};
+let videoIds = [];
 
 async function init() {
     canvas = document.getElementById('canvas');
@@ -170,6 +173,15 @@ async function init() {
     const data = await resp.json();
     images = data.images;
     annotations = data.annotations || {};
+
+    // Build video group index
+    images.forEach((name, idx) => {
+        const match = name.match(/^(.+?)_frame_/);
+        const vid = match ? match[1] : 'unknown';
+        if (!videoGroups[vid]) videoGroups[vid] = [];
+        videoGroups[vid].push(idx);
+    });
+    videoIds = Object.keys(videoGroups);
 
     // Find first unlabeled
     for (let i = 0; i < images.length; i++) {
@@ -205,6 +217,26 @@ function loadFrame() {
 function redraw() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(img, 0, 0);
+
+    // Show previous frame ball position as guide
+    if (currentIdx > 0) {
+        const prevName = images[currentIdx - 1];
+        const prevBall = annotations[prevName];
+        if (prevBall && prevBall.visibility > 0 && prevBall.x >= 0) {
+            const px = prevBall.x * canvas.width;
+            const py = prevBall.y * canvas.height;
+            ctx.strokeStyle = 'rgba(100, 100, 255, 0.4)';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([4, 4]);
+            ctx.beginPath();
+            ctx.arc(px, py, 12, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.fillStyle = 'rgba(100, 100, 255, 0.3)';
+            ctx.font = '10px monospace';
+            ctx.fillText('prev', px + 14, py - 2);
+        }
+    }
 
     if (ballPos && ballPos.visibility > 0) {
         const x = ballPos.x * canvas.width;
@@ -303,6 +335,20 @@ function onKeyDown(e) {
         case 's': case 'S': skipFrame(); break;
         case 'a': case 'A': case 'ArrowLeft': prevFrame(); break;
         case 'd': case 'D': case 'ArrowRight': nextFrame(); break;
+        case 'g': case 'G': jumpToVideoGroup(-1); break;
+        case 'h': case 'H': jumpToVideoGroup(1); break;
+    }
+}
+
+function jumpToVideoGroup(direction) {
+    const currentName = images[currentIdx];
+    const match = currentName.match(/^(.+?)_frame_/);
+    const currentVid = match ? match[1] : 'unknown';
+    const vidIdx = videoIds.indexOf(currentVid);
+    const nextVidIdx = Math.max(0, Math.min(videoIds.length - 1, vidIdx + direction));
+    if (nextVidIdx !== vidIdx) {
+        currentIdx = videoGroups[videoIds[nextVidIdx]][0];
+        loadFrame();
     }
 }
 
