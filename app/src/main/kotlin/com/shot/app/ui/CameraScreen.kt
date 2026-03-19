@@ -2,19 +2,28 @@ package com.shot.app.ui
 
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -33,6 +42,23 @@ fun CameraScreen(
 ) {
     val detectionResult by viewModel.detectionResult.collectAsState()
     val isDebugMode by viewModel.isDebugMode.collectAsState()
+
+    // FPS calculation
+    var fps by remember { mutableFloatStateOf(0f) }
+    var lastFrameTime by remember { mutableLongStateOf(0L) }
+    var frameCount by remember { mutableLongStateOf(0L) }
+    var fpsUpdateTime by remember { mutableLongStateOf(System.currentTimeMillis()) }
+
+    LaunchedEffect(detectionResult) {
+        frameCount++
+        val now = System.currentTimeMillis()
+        val elapsed = now - fpsUpdateTime
+        if (elapsed >= 1000) {
+            fps = frameCount * 1000f / elapsed
+            frameCount = 0
+            fpsUpdateTime = now
+        }
+    }
 
     Box(modifier = Modifier.fillMaxSize()) {
         // Layer 1: Camera Preview
@@ -56,18 +82,20 @@ fun CameraScreen(
             isDebugMode = isDebugMode
         )
 
-        // Layer 3: Status Indicator
+        // Layer 3: Status Indicator (tap to toggle debug)
         StatusIndicator(
             status = detectionResult.status,
             modifier = Modifier
                 .align(Alignment.TopEnd)
                 .padding(16.dp)
+                .clickable { viewModel.toggleDebugMode() }
         )
 
         // Layer 4: Debug Info
         if (isDebugMode) {
             DebugOverlay(
                 result = detectionResult,
+                fps = fps,
                 modifier = Modifier
                     .align(Alignment.TopStart)
                     .padding(16.dp)
@@ -85,6 +113,27 @@ fun CameraScreen(
                     .padding(32.dp)
             )
         }
+
+        // Layer 6: Bottom controls
+        Row(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(16.dp)
+        ) {
+            // Debug toggle button
+            Text(
+                text = if (isDebugMode) "DEBUG ON" else "DEBUG",
+                color = if (isDebugMode) Color.Green else Color.Gray,
+                fontSize = 12.sp,
+                modifier = Modifier
+                    .background(
+                        Color.Black.copy(alpha = 0.5f),
+                        RoundedCornerShape(4.dp)
+                    )
+                    .clickable { viewModel.toggleDebugMode() }
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
+            )
+        }
     }
 }
 
@@ -99,10 +148,6 @@ private fun CourtOverlay(
     val keypointMap = projectedKeypoints.associateBy { it.id }
 
     Canvas(modifier = Modifier.fillMaxSize()) {
-        // Scale from image coordinates to canvas (screen) coordinates.
-        // Camera ImageAnalysis is set to 1280x720, but the actual resolution
-        // may differ. The model outputs normalized coords scaled to image size.
-        // FILL_CENTER crops to fill, so we need to account for aspect ratio.
         val imageAspect = 1280f / 720f
         val canvasAspect = size.width / size.height
 
@@ -112,13 +157,11 @@ private fun CourtOverlay(
         val offsetY: Float
 
         if (imageAspect > canvasAspect) {
-            // Image is wider than canvas → image is cropped on left/right
             scaleY = size.height / 720f
             scaleX = scaleY
             offsetX = (size.width - 1280f * scaleX) / 2f
             offsetY = 0f
         } else {
-            // Image is taller than canvas → image is cropped on top/bottom
             scaleX = size.width / 1280f
             scaleY = scaleX
             offsetX = 0f
@@ -180,25 +223,31 @@ private fun StatusIndicator(
         color = color,
         fontSize = 14.sp,
         modifier = modifier
+            .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(4.dp))
+            .padding(horizontal = 8.dp, vertical = 4.dp)
     )
 }
 
 @Composable
 private fun DebugOverlay(
     result: com.shot.core.model.CourtDetectionResult,
+    fps: Float,
     modifier: Modifier = Modifier
 ) {
     val debugText = buildString {
-        appendLine("FPS: --") // TODO: compute actual FPS
+        appendLine("FPS: ${"%.1f".format(fps)}")
         appendLine("Inference: ${result.inferenceTimeMs} ms")
-        appendLine("Reproj Error: ${"%.1f".format(result.reprojectionError)} px")
-        appendLine("Keypoints: ${result.reliableKeypointCount} / 8")
+        appendLine("Reproj: ${"%.1f".format(result.reprojectionError)} px")
+        appendLine("KP: ${result.reliableKeypointCount}/8 | Proj: ${result.projectedKeypoints.size}/16")
+        appendLine("Status: ${result.status.name}")
     }
 
     Text(
         text = debugText,
         color = Color.White,
-        fontSize = 12.sp,
+        fontSize = 11.sp,
         modifier = modifier
+            .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(4.dp))
+            .padding(8.dp)
     )
 }
