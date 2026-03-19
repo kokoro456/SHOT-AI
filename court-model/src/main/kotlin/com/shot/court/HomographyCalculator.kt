@@ -7,22 +7,24 @@ import com.shot.core.model.Keypoint
  * Computes the homography matrix that maps image pixel coordinates to
  * ITF court coordinates (meters), and vice versa.
  *
- * Uses the Direct Linear Transform (DLT) algorithm with SVD.
+ * Uses the Direct Linear Transform (DLT) algorithm with confidence-weighted
+ * SVD via Jacobi iteration (500 sweeps for numerical stability).
  */
 class HomographyCalculator {
 
-    /**
-     * Compute homography from detected keypoints.
-     */
     fun computeHomography(detectedKeypoints: List<Keypoint>): FloatArray? {
         val validKeypoints = detectedKeypoints.filter { it.confidence > 0.05f }
         if (validKeypoints.size < 4) return null
 
-        val pairs = mutableListOf<Pair<FloatArray, FloatArray>>()
+        val pairs = mutableListOf<Triple<FloatArray, FloatArray, Float>>()
         for (kp in validKeypoints) {
             val courtPoint = ItfCourtSpec.KEYPOINTS[kp.id] ?: continue
             pairs.add(
-                floatArrayOf(kp.x, kp.y) to floatArrayOf(courtPoint.x, courtPoint.y)
+                Triple(
+                    floatArrayOf(kp.x, kp.y),
+                    floatArrayOf(courtPoint.x, courtPoint.y),
+                    kp.confidence.coerceAtLeast(0.1f)
+                )
             )
         }
 
@@ -47,27 +49,27 @@ class HomographyCalculator {
     }
 
     fun invertHomography(h: FloatArray): FloatArray? {
-        val det = h[0] * (h[4] * h[8] - h[5] * h[7]) -
-                h[1] * (h[3] * h[8] - h[5] * h[6]) +
-                h[2] * (h[3] * h[7] - h[4] * h[6])
+        val det = h[0].toDouble() * (h[4].toDouble() * h[8].toDouble() - h[5].toDouble() * h[7].toDouble()) -
+                h[1].toDouble() * (h[3].toDouble() * h[8].toDouble() - h[5].toDouble() * h[6].toDouble()) +
+                h[2].toDouble() * (h[3].toDouble() * h[7].toDouble() - h[4].toDouble() * h[6].toDouble())
 
-        if (Math.abs(det) < 1e-10f) return null
+        if (Math.abs(det) < 1e-10) return null
 
-        val invDet = 1.0f / det
+        val invDet = 1.0 / det
         return floatArrayOf(
-            (h[4] * h[8] - h[5] * h[7]) * invDet,
-            (h[2] * h[7] - h[1] * h[8]) * invDet,
-            (h[1] * h[5] - h[2] * h[4]) * invDet,
-            (h[5] * h[6] - h[3] * h[8]) * invDet,
-            (h[0] * h[8] - h[2] * h[6]) * invDet,
-            (h[2] * h[3] - h[0] * h[5]) * invDet,
-            (h[3] * h[7] - h[4] * h[6]) * invDet,
-            (h[1] * h[6] - h[0] * h[7]) * invDet,
-            (h[0] * h[4] - h[1] * h[3]) * invDet
+            ((h[4].toDouble() * h[8].toDouble() - h[5].toDouble() * h[7].toDouble()) * invDet).toFloat(),
+            ((h[2].toDouble() * h[7].toDouble() - h[1].toDouble() * h[8].toDouble()) * invDet).toFloat(),
+            ((h[1].toDouble() * h[5].toDouble() - h[2].toDouble() * h[4].toDouble()) * invDet).toFloat(),
+            ((h[5].toDouble() * h[6].toDouble() - h[3].toDouble() * h[8].toDouble()) * invDet).toFloat(),
+            ((h[0].toDouble() * h[8].toDouble() - h[2].toDouble() * h[6].toDouble()) * invDet).toFloat(),
+            ((h[2].toDouble() * h[3].toDouble() - h[0].toDouble() * h[5].toDouble()) * invDet).toFloat(),
+            ((h[3].toDouble() * h[7].toDouble() - h[4].toDouble() * h[6].toDouble()) * invDet).toFloat(),
+            ((h[1].toDouble() * h[6].toDouble() - h[0].toDouble() * h[7].toDouble()) * invDet).toFloat(),
+            ((h[0].toDouble() * h[4].toDouble() - h[1].toDouble() * h[3].toDouble()) * invDet).toFloat()
         )
     }
 
-    private fun computeDLT(pairs: List<Pair<FloatArray, FloatArray>>): FloatArray? {
+    private fun computeDLT(pairs: List<Triple<FloatArray, FloatArray, Float>>): FloatArray? {
         val n = pairs.size
 
         // Normalize source points (image coordinates)
@@ -92,7 +94,7 @@ class HomographyCalculator {
         }.average()
         val dstScale = if (dstAvgDist < 1e-10) 1.0 else Math.sqrt(2.0) / dstAvgDist
 
-        // Build the 2N x 9 matrix A
+        // Build the 2N x 9 matrix A with confidence weighting
         val a = Array(n * 2) { DoubleArray(9) }
 
         for (i in 0 until n) {
@@ -100,14 +102,15 @@ class HomographyCalculator {
             val sy = (pairs[i].first[1] - srcMeanY) * srcScale
             val dx = (pairs[i].second[0] - dstMeanX) * dstScale
             val dy = (pairs[i].second[1] - dstMeanY) * dstScale
+            val w = Math.sqrt(pairs[i].third.toDouble()) // confidence weight
 
-            a[2 * i][0] = -sx; a[2 * i][1] = -sy; a[2 * i][2] = -1.0
+            a[2 * i][0] = -sx * w; a[2 * i][1] = -sy * w; a[2 * i][2] = -1.0 * w
             a[2 * i][3] = 0.0; a[2 * i][4] = 0.0; a[2 * i][5] = 0.0
-            a[2 * i][6] = dx * sx; a[2 * i][7] = dx * sy; a[2 * i][8] = dx
+            a[2 * i][6] = dx * sx * w; a[2 * i][7] = dx * sy * w; a[2 * i][8] = dx * w
 
             a[2 * i + 1][0] = 0.0; a[2 * i + 1][1] = 0.0; a[2 * i + 1][2] = 0.0
-            a[2 * i + 1][3] = -sx; a[2 * i + 1][4] = -sy; a[2 * i + 1][5] = -1.0
-            a[2 * i + 1][6] = dy * sx; a[2 * i + 1][7] = dy * sy; a[2 * i + 1][8] = dy
+            a[2 * i + 1][3] = -sx * w; a[2 * i + 1][4] = -sy * w; a[2 * i + 1][5] = -1.0 * w
+            a[2 * i + 1][6] = dy * sx * w; a[2 * i + 1][7] = dy * sy * w; a[2 * i + 1][8] = dy * w
         }
 
         // Compute A^T * A (9x9 symmetric)
@@ -126,7 +129,7 @@ class HomographyCalculator {
         // Find eigenvector of smallest eigenvalue using Jacobi iteration
         val h = smallestEigenvectorJacobi(ata, 9) ?: return null
 
-        // Denormalize: H = T_dst_inv × H_normalized × T_src
+        // Denormalize: H = T_dst_inv * H_normalized * T_src
         val tSrc = doubleArrayOf(
             srcScale, 0.0, -srcMeanX * srcScale,
             0.0, srcScale, -srcMeanY * srcScale,
@@ -137,9 +140,8 @@ class HomographyCalculator {
             0.0, 1.0 / dstScale, dstMeanY,
             0.0, 0.0, 1.0
         )
-        val hNorm = h.copyOf()
 
-        val temp = multiply3x3d(hNorm, tSrc)
+        val temp = multiply3x3d(h, tSrc)
         val result = multiply3x3d(tDstInv, temp)
 
         // Normalize so result[8] = 1
@@ -152,14 +154,14 @@ class HomographyCalculator {
     /**
      * Jacobi eigenvalue algorithm for 9x9 symmetric matrix.
      * Returns eigenvector corresponding to the smallest eigenvalue.
-     * Uses 200 iterations for better convergence.
+     * Uses 500 iterations for robust convergence on ill-conditioned matrices.
      */
     private fun smallestEigenvectorJacobi(matrix: Array<DoubleArray>, n: Int): DoubleArray? {
         val a = Array(n) { matrix[it].copyOf() }
         val v = Array(n) { DoubleArray(n) }
         for (i in 0 until n) v[i][i] = 1.0
 
-        for (iter in 0 until 200) {
+        for (iter in 0 until 500) {
             // Find largest off-diagonal element
             var maxVal = 0.0
             var p = 0
@@ -213,15 +215,18 @@ class HomographyCalculator {
             }
         }
 
-        // Find index of smallest eigenvalue
+        // Condition number check: reject ill-conditioned systems
+        var minEig = Math.abs(a[0][0])
+        var maxEig = Math.abs(a[0][0])
         var minIdx = 0
-        var minVal = a[0][0]
         for (i in 1 until n) {
-            if (a[i][i] < minVal) {
-                minVal = a[i][i]
-                minIdx = i
-            }
+            val absEig = Math.abs(a[i][i])
+            if (absEig < minEig) { minEig = absEig; minIdx = i }
+            if (absEig > maxEig) { maxEig = absEig }
         }
+
+        // Reject if condition number is too high (ill-conditioned)
+        if (minEig > 0 && maxEig / minEig > 1e8) return null
 
         return DoubleArray(n) { v[it][minIdx] }
     }

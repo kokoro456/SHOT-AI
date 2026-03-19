@@ -3,67 +3,83 @@ package com.shot.court
 import com.shot.core.model.Keypoint
 
 /**
- * Temporal smoothing for homography matrices using Exponential Moving Average (EMA).
+ * Temporal smoothing for detected keypoints using Exponential Moving Average (EMA).
  *
- * Reduces jitter in the court overlay by smoothing consecutive homography estimates.
+ * Smooths keypoint coordinates across frames to reduce jitter in the court overlay.
+ * Also smooths the resulting homography for additional stability.
  * Resets when a sudden scene change is detected (keypoint jump > threshold).
  */
 class TemporalSmoother(
-    /** EMA smoothing factor. Higher = more weight on new frame. 0.7 = recommended. */
-    private val alpha: Float = 0.7f,
+    /** EMA smoothing factor for keypoints. Lower = smoother. 0.3 recommended. */
+    private val keypointAlpha: Float = 0.3f,
+
+    /** EMA smoothing factor for homography. Lower = smoother. */
+    private val homographyAlpha: Float = 0.3f,
 
     /** Keypoint movement threshold (pixels) to trigger filter reset. */
-    private val jumpThreshold: Float = 20f
+    private val jumpThreshold: Float = 30f
 ) {
 
+    private var smoothedKeypoints: MutableMap<Int, FloatArray> = mutableMapOf()
     private var smoothedH: FloatArray? = null
-    private var previousKeypoints: Map<Int, Keypoint>? = null
+    private var frameCount = 0
 
     /**
-     * Smooth a new homography matrix.
-     *
-     * @param newH Raw homography from current frame (3x3, row-major)
-     * @param currentKeypoints Current frame's detected keypoints (for jump detection)
-     * @return Smoothed homography matrix
+     * Smooth keypoints before homography computation.
+     * Returns smoothed keypoints with stable coordinates.
      */
-    fun smooth(newH: FloatArray, currentKeypoints: List<Keypoint>): FloatArray {
-        // Check for scene change (sudden keypoint jump)
+    fun smoothKeypoints(currentKeypoints: List<Keypoint>): List<Keypoint> {
         if (shouldReset(currentKeypoints)) {
             reset()
         }
 
-        smoothedH = smoothedH?.let { prev ->
-            FloatArray(9) { i -> alpha * newH[i] + (1 - alpha) * prev[i] }
-        } ?: newH.copyOf()
+        frameCount++
 
-        // Update previous keypoints for next frame's jump detection
-        previousKeypoints = currentKeypoints.associateBy { it.id }
+        return currentKeypoints.map { kp ->
+            val prev = smoothedKeypoints[kp.id]
+            if (prev != null) {
+                val sx = keypointAlpha * kp.x + (1 - keypointAlpha) * prev[0]
+                val sy = keypointAlpha * kp.y + (1 - keypointAlpha) * prev[1]
+                val sc = keypointAlpha * kp.confidence + (1 - keypointAlpha) * prev[2]
+                smoothedKeypoints[kp.id] = floatArrayOf(sx, sy, sc)
+                Keypoint(kp.id, sx, sy, sc)
+            } else {
+                smoothedKeypoints[kp.id] = floatArrayOf(kp.x, kp.y, kp.confidence)
+                kp
+            }
+        }
+    }
+
+    /**
+     * Smooth homography matrix for additional stability.
+     */
+    fun smooth(newH: FloatArray, currentKeypoints: List<Keypoint>): FloatArray {
+        smoothedH = smoothedH?.let { prev ->
+            FloatArray(9) { i -> homographyAlpha * newH[i] + (1 - homographyAlpha) * prev[i] }
+        } ?: newH.copyOf()
 
         return smoothedH!!.copyOf()
     }
 
-    /**
-     * Reset the smoother (e.g., on scene change).
-     */
     fun reset() {
+        smoothedKeypoints.clear()
         smoothedH = null
-        previousKeypoints = null
+        frameCount = 0
     }
 
-    /**
-     * Detect if keypoints jumped significantly between frames.
-     */
     private fun shouldReset(currentKeypoints: List<Keypoint>): Boolean {
-        val prev = previousKeypoints ?: return false
+        if (smoothedKeypoints.isEmpty()) return false
 
+        var jumpCount = 0
         for (kp in currentKeypoints) {
-            val prevKp = prev[kp.id] ?: continue
-            val dx = kp.x - prevKp.x
-            val dy = kp.y - prevKp.y
+            val prev = smoothedKeypoints[kp.id] ?: continue
+            val dx = kp.x - prev[0]
+            val dy = kp.y - prev[1]
             val distance = Math.sqrt((dx * dx + dy * dy).toDouble()).toFloat()
-            if (distance > jumpThreshold) return true
+            if (distance > jumpThreshold) jumpCount++
         }
 
-        return false
+        // Reset only if multiple keypoints jump (not just noise on one point)
+        return jumpCount >= 3
     }
 }

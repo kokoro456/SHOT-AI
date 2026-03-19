@@ -2,6 +2,7 @@ package com.shot.app.viewmodel
 
 import android.app.Application
 import android.graphics.Bitmap
+import android.graphics.Color
 import android.util.Log
 import androidx.camera.core.ImageProxy
 import androidx.camera.view.PreviewView
@@ -10,6 +11,7 @@ import androidx.lifecycle.findViewTreeLifecycleOwner
 import com.shot.camera.CameraManager
 import com.shot.court.CourtProjector
 import com.shot.court.HomographyCalculator
+import com.shot.court.HomographyValidator
 import com.shot.court.TemporalSmoother
 import com.shot.core.model.CourtDetectionResult
 import com.shot.core.model.DetectionStatus
@@ -20,6 +22,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import javax.inject.Inject
+import kotlin.math.abs
 import kotlin.math.sqrt
 
 @HiltViewModel
@@ -34,10 +37,10 @@ class CameraViewModel @Inject constructor(
     private val detector = CourtKeypointDetector(application)
     private val homographyCalculator = HomographyCalculator()
     private val projector = CourtProjector(homographyCalculator)
+    private val validator = HomographyValidator()
     private val smoother = TemporalSmoother()
 
     // Default keypoint positions (model outputs these for non-court scenes)
-    // Captured from black/random input testing
     private val defaultPositions = floatArrayOf(
         0.29f, 0.53f,  // kp9
         0.52f, 0.53f,  // kp10
@@ -72,34 +75,108 @@ class CameraViewModel @Inject constructor(
     }
 
     /**
-     * Check if detected keypoints are too similar to the model's default output
-     * (which appears for any non-court scene). If keypoints haven't moved from
-     * defaults, we're not looking at a real court.
-     *
-     * Returns the mean distance from default positions (normalized 0-1 coords).
+     * Fast pre-check: is the image usable for court detection?
+     * Rejects covered cameras, pitch-black, or uniform scenes.
+     * Samples a 32x32 grid and checks grayscale variance.
      */
+    private fun isImageUsable(bitmap: Bitmap): Boolean {
+        val small = Bitmap.createScaledBitmap(bitmap, 32, 32, false)
+        var sum = 0.0
+        var sumSq = 0.0
+        val total = 32 * 32
+        for (y in 0 until 32) {
+            for (x in 0 until 32) {
+                val pixel = small.getPixel(x, y)
+                val gray = (Color.red(pixel) * 0.299 + Color.green(pixel) * 0.587 + Color.blue(pixel) * 0.114)
+                sum += gray
+                sumSq += gray * gray
+            }
+        }
+        small.recycle()
+        val mean = sum / total
+        val variance = (sumSq / total) - (mean * mean)
+        return variance > 100.0 // uniform/dark images have very low variance
+    }
+
+    /**
+     * Multi-criteria check: are these keypoints from a real court?
+     */
+    private fun isRealDetection(keypoints: List<Keypoint>, imageWidth: Int, imageHeight: Int): Boolean {
+        if (keypoints.size < 6) return false
+
+        // Criterion 1: Mean confidence must be reasonable
+        val meanConf = keypoints.map { it.confidence }.average().toFloat()
+        if (meanConf < 0.5f) return false
+
+        // Criterion 2: Confidence shouldn't be too scattered (real courts are more uniform)
+        val confValues = keypoints.map { it.confidence.toDouble() }
+        val confMean = confValues.average()
+        val confStd = sqrt(confValues.map { (it - confMean) * (it - confMean) }.average()).toFloat()
+        if (confStd > 0.25f) return false
+
+        // Criterion 3: Baseline should span reasonable width
+        val kp12 = keypoints.find { it.id == 12 }
+        val kp16 = keypoints.find { it.id == 16 }
+        if (kp12 != null && kp16 != null) {
+            val baselineWidth = abs(kp16.x - kp12.x) / imageWidth
+            if (baselineWidth < 0.15f) return false
+        }
+
+        // Criterion 4: Distance from model's default output
+        val defaultDist = distanceFromDefaults(keypoints, imageWidth, imageHeight)
+        if (defaultDist < 0.02f) return false
+
+        // Criterion 5: At least 6 keypoints with high confidence
+        val reliableCount = keypoints.count { it.confidence > 0.7f }
+        if (reliableCount < 6) return false
+
+        return true
+    }
+
     private fun distanceFromDefaults(keypoints: List<Keypoint>, imageWidth: Int, imageHeight: Int): Float {
         var totalDist = 0f
-        for ((i, kp) in keypoints.withIndex()) {
+        var count = 0
+        for (kp in keypoints) {
+            val idx = kp.id - 9
+            if (idx < 0 || idx >= 8) continue
             val normX = kp.x / imageWidth
             val normY = kp.y / imageHeight
-            val defX = defaultPositions[i * 2]
-            val defY = defaultPositions[i * 2 + 1]
+            val defX = defaultPositions[idx * 2]
+            val defY = defaultPositions[idx * 2 + 1]
             val dx = normX - defX
             val dy = normY - defY
             totalDist += sqrt(dx * dx + dy * dy)
+            count++
         }
-        return totalDist / keypoints.size
+        return if (count > 0) totalDist / count else 0f
+    }
+
+    private fun emitNotDetected(keypoints: List<Keypoint>, inferenceTimeMs: Long) {
+        _detectionResult.value = CourtDetectionResult(
+            detectedKeypoints = keypoints,
+            projectedKeypoints = emptyList(),
+            homographyMatrix = null,
+            reprojectionError = Float.MAX_VALUE,
+            inferenceTimeMs = inferenceTimeMs,
+            status = DetectionStatus.NOT_DETECTED
+        )
+        smoother.reset()
     }
 
     private fun processFrame(imageProxy: ImageProxy) {
         try {
             val startTime = System.nanoTime()
 
-            // Convert ImageProxy to Bitmap
             val bitmap = imageProxyToBitmap(imageProxy)
             val imageWidth = imageProxy.width
             val imageHeight = imageProxy.height
+
+            // Pre-check: reject uniform/dark images before inference
+            if (!isImageUsable(bitmap)) {
+                bitmap.recycle()
+                emitNotDetected(emptyList(), (System.nanoTime() - startTime) / 1_000_000)
+                return
+            }
 
             // Step 1: Detect keypoints
             val keypoints = detector.detect(bitmap, imageWidth, imageHeight)
@@ -107,60 +184,45 @@ class CameraViewModel @Inject constructor(
 
             val inferenceTimeMs = (System.nanoTime() - startTime) / 1_000_000
 
-            // Step 2: Check if keypoints differ from model's default output
-            // Real court → keypoints move to actual court positions (distance > 0.03)
-            // Non-court → keypoints stay at default positions (distance < 0.03)
-            val defaultDist = distanceFromDefaults(keypoints, imageWidth, imageHeight)
-            val isRealDetection = defaultDist > 0.03f
-
-            Log.d("SHOT_DEBUG", "defaultDist=${"%.4f".format(defaultDist)} isReal=$isRealDetection")
-
-            if (!isRealDetection) {
-                _detectionResult.value = CourtDetectionResult(
-                    detectedKeypoints = keypoints,
-                    projectedKeypoints = emptyList(),
-                    homographyMatrix = null,
-                    reprojectionError = Float.MAX_VALUE,
-                    inferenceTimeMs = inferenceTimeMs,
-                    status = DetectionStatus.NOT_DETECTED
-                )
-                smoother.reset()
+            // Step 2: Multi-criteria false positive check
+            if (!isRealDetection(keypoints, imageWidth, imageHeight)) {
+                emitNotDetected(keypoints, inferenceTimeMs)
                 return
             }
 
-            // Step 3: Compute homography
-            val rawH = homographyCalculator.computeHomography(keypoints)
+            // Step 3: Smooth keypoints to reduce jitter
+            val smoothedKeypoints = smoother.smoothKeypoints(keypoints)
+
+            // Step 4: Compute homography from smoothed keypoints
+            val rawH = homographyCalculator.computeHomography(smoothedKeypoints)
             if (rawH == null) {
-                _detectionResult.value = CourtDetectionResult(
-                    detectedKeypoints = keypoints,
-                    projectedKeypoints = emptyList(),
-                    homographyMatrix = null,
-                    reprojectionError = Float.MAX_VALUE,
-                    inferenceTimeMs = inferenceTimeMs,
-                    status = DetectionStatus.PARTIAL
-                )
+                emitNotDetected(keypoints, inferenceTimeMs)
                 return
             }
 
-            // Step 4: Temporal smoothing
-            val smoothedH = smoother.smooth(rawH, keypoints)
+            // Step 5: Smooth homography for additional stability
+            val smoothedH = smoother.smooth(rawH, smoothedKeypoints)
 
-            // Step 5: Project all 16 keypoints
-            val projectedKeypoints = projector.projectAllKeypoints(smoothedH)
-            val reprojError = projector.computeReprojectionError(keypoints, smoothedH)
+            // Step 6: Project all 16 keypoints
+            val allProjected = projector.projectAllKeypoints(smoothedH)
 
-            Log.d("SHOT_DEBUG", "reproj=${"%.2f".format(reprojError)} projected=${projectedKeypoints.size}")
+            // Step 7: Validate projected points geometry
+            val validProjected = validator.filterValidProjections(
+                allProjected, keypoints, imageWidth, imageHeight
+            )
 
-            // Step 6: Determine detection status
+            val reprojError = projector.computeReprojectionError(smoothedKeypoints, smoothedH)
+
+            // Step 8: Determine detection status
             val status = when {
-                reprojError < 20f && projectedKeypoints.size >= 12 -> DetectionStatus.DETECTED
-                reprojError < 50f && projectedKeypoints.size >= 8 -> DetectionStatus.PARTIAL
+                reprojError < 20f && validProjected.size >= 12 -> DetectionStatus.DETECTED
+                reprojError < 50f && validProjected.size >= 8 -> DetectionStatus.PARTIAL
                 else -> DetectionStatus.NOT_DETECTED
             }
 
             _detectionResult.value = CourtDetectionResult(
                 detectedKeypoints = keypoints,
-                projectedKeypoints = projectedKeypoints,
+                projectedKeypoints = validProjected,
                 homographyMatrix = smoothedH,
                 reprojectionError = reprojError,
                 inferenceTimeMs = inferenceTimeMs,
@@ -174,7 +236,6 @@ class CameraViewModel @Inject constructor(
     }
 
     private fun imageProxyToBitmap(imageProxy: ImageProxy): Bitmap {
-        // RGBA_8888 format (set in CameraManager)
         val buffer = imageProxy.planes[0].buffer
         val pixelStride = imageProxy.planes[0].pixelStride
         val rowStride = imageProxy.planes[0].rowStride
@@ -188,7 +249,6 @@ class CameraViewModel @Inject constructor(
         buffer.rewind()
         bitmap.copyPixelsFromBuffer(buffer)
 
-        // Crop padding if needed
         return if (rowPadding > 0) {
             Bitmap.createBitmap(bitmap, 0, 0, imageProxy.width, imageProxy.height)
         } else {

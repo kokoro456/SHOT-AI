@@ -1,9 +1,10 @@
 package com.shot.court
 
 import com.shot.core.model.Keypoint
+import kotlin.math.abs
 
 /**
- * Validates homography matrices using reprojection error.
+ * Validates homography matrices and filters geometrically invalid projections.
  */
 class HomographyValidator(
     private val projector: CourtProjector = CourtProjector()
@@ -26,5 +27,93 @@ class HomographyValidator(
         if (error > MAX_REPROJECTION_ERROR || error.isNaN()) return false
 
         return true
+    }
+
+    /**
+     * Filter projected keypoints by geometric validity.
+     *
+     * Near-court points (KP9-16) are always kept (they come from direct detection).
+     * Far-court points (KP1-8) are validated against geometric constraints:
+     * - Must be within reasonable image bounds
+     * - Must be above (lower y) the near-court points in image space
+     * - Far baseline must be narrower than near baseline (perspective foreshortening)
+     *
+     * Invalid far-court points are removed to prevent wild overlay rendering.
+     */
+    fun filterValidProjections(
+        projected: List<Keypoint>,
+        detected: List<Keypoint>,
+        imageWidth: Int,
+        imageHeight: Int
+    ): List<Keypoint> {
+        if (projected.isEmpty()) return projected
+
+        // Separate near-court (KP9-16) and far-court (KP1-8)
+        val nearCourt = projected.filter { it.id in 9..16 }
+        val farCourt = projected.filter { it.id in 1..8 }
+
+        // Always keep near-court points (from direct detection, reliable)
+        val result = nearCourt.toMutableList()
+
+        if (farCourt.isEmpty() || nearCourt.isEmpty()) return result
+
+        // Reference: average y of near-court detected keypoints
+        val nearMeanY = detected.filter { it.id in 9..16 }.map { it.y }.average().toFloat()
+
+        // Near baseline width (KP12 to KP16)
+        val nearLeft = detected.find { it.id == 12 }
+        val nearRight = detected.find { it.id == 16 }
+        val nearBaselineWidth = if (nearLeft != null && nearRight != null) {
+            abs(nearRight.x - nearLeft.x)
+        } else {
+            imageWidth * 0.5f // fallback
+        }
+
+        // Far baseline width (KP1 to KP5)
+        val farLeft = farCourt.find { it.id == 1 }
+        val farRight = farCourt.find { it.id == 5 }
+        val farBaselineWidth = if (farLeft != null && farRight != null) {
+            abs(farRight.x - farLeft.x)
+        } else {
+            null
+        }
+
+        // Geometric check: far baseline should be narrower than near baseline
+        val farNearRatio = if (farBaselineWidth != null && nearBaselineWidth > 0) {
+            farBaselineWidth / nearBaselineWidth
+        } else {
+            null
+        }
+
+        // If far baseline is wider than near baseline, projection is invalid
+        val farCourtGeometryValid = farNearRatio == null || farNearRatio in 0.05f..0.95f
+
+        // Validate each far-court point individually
+        val margin = imageWidth * 0.5f // allow points slightly outside frame
+        for (kp in farCourt) {
+            var valid = true
+
+            // Bound check: must be within extended image bounds
+            if (kp.x < -margin || kp.x > imageWidth + margin ||
+                kp.y < -margin || kp.y > imageHeight + margin) {
+                valid = false
+            }
+
+            // Far-court points should be above (lower y) near-court points in image
+            if (kp.y > nearMeanY) {
+                valid = false
+            }
+
+            // If overall far-court geometry is invalid, reject all far points
+            if (!farCourtGeometryValid) {
+                valid = false
+            }
+
+            if (valid) {
+                result.add(kp)
+            }
+        }
+
+        return result
     }
 }
