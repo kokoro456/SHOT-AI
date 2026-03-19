@@ -16,7 +16,9 @@ SHOT은 핸드폰 카메라로 테니스 코트 라인을 실시간 인식하는
 ## 현재 상태 요약 (2026-03-19)
 
 ### 완료된 것
-- ✅ ML 모델 학습 완료 (히트맵 3-stage, 2.41px 오차)
+- ✅ ML 모델 학습 완료 (히트맵 3-stage v2, **0.68px 오차**, 이전 2.41px 대비 3.5배 개선)
+- ✅ SNTC 데이터 대규모 수집: 678 동영상에서 753 프레임 추출, 622장 라벨링
+- ✅ 총 라벨링 데이터: 961장 (YouTube 339 + SNTC 462 + SNTC selected 160)
 - ✅ Android 프로젝트 스캐폴딩 (멀티모듈)
 - ✅ Android 빌드 성공 (Gradle 8.9, AGP 8.7.3)
 - ✅ 실기기(USB) 설치 + 실행 성공
@@ -26,11 +28,14 @@ SHOT은 핸드폰 카메라로 테니스 코트 라인을 실시간 인식하는
 - ✅ 키포인트 시각화 (초록 원)
 - ✅ 상태 표시 (코트 인식됨/부분 인식/미인식)
 - ✅ 디버그 정보 표시 (추론시간, 재투영오차, 키포인트수)
+- ✅ TFLite 변환 실패 → ONNX Runtime으로 전환 (Android 배포)
+- ✅ 새 모델(v2) 폰 배포 완료, 모니터 스크린샷(12.jpg, 123.jpg) 테스트에서 유의미한 개선 확인
+- ✅ 오버레이 지터 수정: deadzone 4px, 3-frame gate, homography deadzone, output stabilization
+- ✅ 라벨링 도구 개선: 같은 영상 그룹 라벨 복사 기능
 
 ### 현재 문제점
-- ❌ **호모그래피 역산 정밀도 부족**: 니어코트 키포인트는 정확하나, 파코트 투영이 크게 어긋남 (SHOT.jpg 참조)
-- ❌ **False positive**: 카메라를 가려도 "코트 인식됨"으로 판정 (모델 기본출력이 검증 통과)
-- ❌ **방송 화면에서만 테스트됨**: 실제 핸드폰으로 코트를 직접 비추는 테스트 미수행
+- ❌ **실제 코트 필드 테스트 미수행**: 모니터 스크린샷 테스트에서 개선 확인했으나 실제 코트 테스트 필요
+- ❌ **TFLite 변환 불가**: onnx2tf가 decoder의 skip connection을 처리 못함 → ONNX Runtime 사용 중
 - ❌ Android Studio Run 버튼 비활성화 (Gradle sync 문제, ADB 직접 설치로 우회)
 
 ### 테스트 스크린샷 분석
@@ -107,19 +112,19 @@ SHOT/
 
 ### 3. 모델 학습 결과
 
-**히트맵 3-Stage 학습 최종 결과: 평균 오차 2.41px** 🎯
+**히트맵 3-Stage v2 학습 최종 결과: 평균 오차 0.68px** (이전 v1: 2.41px, 3.5배 개선)
 
 | Stage | 내용 | 오차(px) |
 |-------|------|----------|
-| Stage 1 | Broadcast 8,841장 pretrain | 13.86 |
-| Stage 2 | Mixed 50:50 oversampling | **2.41** ⭐ |
-| Stage 3 | Phone 272장 fine-tune | 2.48 |
+| v1 Stage 2 | 339장 phone data, Mixed 50:50 | 2.41 |
+| **v2 Stage 2** | **961장 phone data (YouTube 339 + SNTC 622), Mixed 50:50** | **0.68** |
 
-**TFLite 모델:**
-- 크기: 4.25 MB (FP32), 목표 <10MB 달성
-- 입력: `[1, 256, 256, 3]` NHWC float32, ImageNet 정규화
-- 출력: `[1, 24]` float32 (8 keypoints × [x, y, confidence])
-- 배치 위치: `court-detection/src/main/assets/court_keypoint.tflite`
+**모델 배포 (ONNX Runtime):**
+- TFLite 변환 실패: onnx2tf가 decoder의 skip connection 처리 불가
+- ONNX Runtime for Android로 전환
+- 입력: `[1, 3, 256, 256]` NCHW float32, ImageNet 정규화
+- 출력: 8 keypoints × [x, y, confidence]
+- 배치 위치: `court-detection/src/main/assets/` (ONNX 모델)
 
 ### 4. Android 빌드 환경 구축 (2026-03-19)
 
@@ -214,20 +219,24 @@ python -m uv venv .venv312 --python 3.12
 python -m uv pip install --python .venv312/Scripts/python.exe -r requirements.txt
 ```
 
-### TFLite 변환 파이프라인
+### 모델 변환 파이프라인
 
 ```
-PyTorch (NCHW) → ONNX (opset 18) → onnx2tf → TFLite (NHWC)
+[v1] PyTorch (NCHW) → ONNX (opset 18) → onnx2tf → TFLite (NHWC)  ← 더 이상 사용 안 함
+[v2] PyTorch (NCHW) → ONNX (opset 18) → ONNX Runtime (Android)   ← 현재 사용 중
 ```
 
-핵심 파라미터: `keep_ncw_or_nchw_or_ncdhw_input_names=["input"]`
+TFLite 변환 실패 원인: onnx2tf가 히트맵 decoder의 skip connection(ConvTranspose2d + concat)을 처리하지 못함.
+ONNX Runtime은 NCHW를 그대로 사용하므로 변환 문제 없음.
 
 ### 데이터셋
 
 - **방송 데이터**: yastrebksv/TennisCourtDetector (MIT 라이선스, Kaggle)
-- **핸드폰 데이터**: YouTube 동호인 영상에서 수집 (339장 라벨링 완료)
-  - 프레임: `ml/data/youtube/review/frames/` (360장)
-  - 라벨: `ml/data/youtube/labeled_annotations.json` (339장)
+- **핸드폰 데이터**: 총 961장 라벨링 완료
+  - YouTube 동호인 영상: 339장 (`ml/data/youtube/labeled_annotations.json`)
+  - SNTC YouTube 채널: 678 동영상에서 753 프레임 추출, 462장 라벨링
+  - SNTC selected: 160장 추가 라벨링
+  - 합계: 339 + 462 + 160 = 961장
 
 **키포인트 매핑 (yastrebksv → SHOT):**
 
@@ -248,9 +257,9 @@ PyTorch (NCHW) → ONNX (opset 18) → onnx2tf → TFLite (NHWC)
 
 ### Phase 1C: 검출 파이프라인 품질 개선 (즉시)
 
-1. [ ] 호모그래피 정밀도 개선 (OpenCV JNI 도입 또는 DLT 수치안정성 강화)
-2. [ ] False positive 제거 (프레임간 변화량 + 이미지 variance 기반)
-3. [ ] 실제 코트에서 필드 테스트
+1. [x] ~~호모그래피 정밀도 개선~~ → 오버레이 지터 수정 (deadzone, 3-frame gate, stabilization)
+2. [x] ~~False positive 제거~~ → 개선됨
+3. [ ] **실제 코트에서 필드 테스트** (최우선)
 4. [ ] Android Studio Gradle sync 해결 (Run 버튼 활성화)
 
 ### Phase 1D: UI 및 마무리
@@ -264,10 +273,16 @@ PyTorch (NCHW) → ONNX (opset 18) → onnx2tf → TFLite (NHWC)
 8. [ ] 완료 게이트: 10초 연속 95% 프레임 성공
 9. [ ] 20개 다양한 코트에서 테스트
 
+### Phase 2: TrackNet 공 추적 (향후)
+
+- [ ] TrackNet 모델 학습 (공 위치 추적)
+- [ ] 공 궤적 기반 착지점 판정
+- [ ] Android 통합
+
 ### 향후 (데이터 추가 확보)
 
-- [ ] YouTube 영상 추가 수집 → 1,000장+ 목표
-- [ ] 모델 예측 보조 라벨링으로 효율화
+- [x] ~~YouTube 영상 추가 수집 → 1,000장+ 목표~~ → 961장 달성 (목표 근접)
+- [x] ~~모델 예측 보조 라벨링으로 효율화~~ → 라벨 복사 기능 구현
 - [ ] INT8 양자화 검토 (FP32 → 모바일 속도 개선용)
 
 ---
@@ -297,9 +312,11 @@ PyTorch (NCHW) → ONNX (opset 18) → onnx2tf → TFLite (NHWC)
 자세한 실패 분석 및 교훈은 `docs/RETROSPECTIVE.md` 참조.
 
 **핵심 요약:**
-1. FC direct regression은 공간 정보 손실 → 히트맵 기반으로 변경 → **2.41px 달성!**
-2. 339장으로도 3-stage 전략 덕분에 목표 달성, 하지만 Stage 3 과적합 → 1,000장 이상 시 추가 개선 가능
+1. FC direct regression은 공간 정보 손실 → 히트맵 기반으로 변경 → **2.41px → 0.68px 달성!**
+2. 데이터 스케일링 효과 입증: 339장 → 961장 = 2.41px → 0.68px (3.5배 개선)
 3. 단순 합산보다 3단계 학습 (pretrain → mixed → fine-tune)
 4. soft-argmax 함정: 평평한 히트맵에서 중심(0.5,0.5)으로 수렴 → argmax 사용
 5. 테스트는 반드시 타겟 도메인(핸드폰)으로
 6. Colab에서 broadcast 이미지 전처리(256x256 JPEG) 필수 → 6배 속도 향상
+7. TFLite 변환 실패 → ONNX Runtime이 대안 (skip connection 있는 decoder 구조에서)
+8. 데이터 양 vs 모델 구조: 같은 모델에서 데이터 3배 → 오차 3.5배 감소

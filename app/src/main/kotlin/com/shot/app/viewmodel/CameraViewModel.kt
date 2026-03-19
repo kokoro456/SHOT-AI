@@ -40,6 +40,14 @@ class CameraViewModel @Inject constructor(
     private val validator = HomographyValidator()
     private val smoother = TemporalSmoother()
 
+    // Output-level stabilization: suppress emitting new results when projected
+    // keypoints are nearly identical to the last emitted ones.
+    private var lastEmittedProjected: List<Keypoint>? = null
+    private var lastEmittedH: FloatArray? = null
+
+    /** Max average movement (pixels) of projected keypoints before we emit an update. */
+    private val outputDeadzoneThreshold = 2.0f
+
     // Default keypoint positions (model outputs these for non-court scenes)
     private val defaultPositions = floatArrayOf(
         0.29f, 0.53f,  // kp9
@@ -161,6 +169,32 @@ class CameraViewModel @Inject constructor(
             status = DetectionStatus.NOT_DETECTED
         )
         smoother.reset()
+        lastEmittedProjected = null
+        lastEmittedH = null
+    }
+
+    /**
+     * Check whether the new projected keypoints are close enough to the previously
+     * emitted ones that we can suppress the update and avoid micro-jitter.
+     */
+    private fun isOutputStable(
+        prev: List<Keypoint>,
+        current: List<Keypoint>
+    ): Boolean {
+        if (prev.size != current.size) return false
+        val prevById = prev.associateBy { it.id }
+        var totalDist = 0f
+        var count = 0
+        for (kp in current) {
+            val p = prevById[kp.id] ?: return false
+            val dx = kp.x - p.x
+            val dy = kp.y - p.y
+            totalDist += sqrt(dx * dx + dy * dy)
+            count++
+        }
+        if (count == 0) return false
+        val avgDist = totalDist / count
+        return avgDist < outputDeadzoneThreshold
     }
 
     private fun processFrame(imageProxy: ImageProxy) {
@@ -220,10 +254,28 @@ class CameraViewModel @Inject constructor(
                 else -> DetectionStatus.NOT_DETECTED
             }
 
+            // Step 9: Output-level stabilization – if the projected overlay barely
+            // moved compared to the last emitted frame, reuse the previous projected
+            // points and homography to keep the overlay perfectly still.
+            val prevProjected = lastEmittedProjected
+            val prevH = lastEmittedH
+            val useStabilized = prevProjected != null && prevH != null
+                    && prevProjected.size == validProjected.size
+                    && status != DetectionStatus.NOT_DETECTED
+                    && isOutputStable(prevProjected, validProjected)
+
+            val finalProjected = if (useStabilized) prevProjected!! else validProjected
+            val finalH = if (useStabilized) prevH!! else smoothedH
+
+            if (!useStabilized) {
+                lastEmittedProjected = validProjected
+                lastEmittedH = smoothedH.copyOf()
+            }
+
             _detectionResult.value = CourtDetectionResult(
                 detectedKeypoints = keypoints,
-                projectedKeypoints = validProjected,
-                homographyMatrix = smoothedH,
+                projectedKeypoints = finalProjected,
+                homographyMatrix = finalH,
                 reprojectionError = reprojError,
                 inferenceTimeMs = inferenceTimeMs,
                 status = status
