@@ -1,6 +1,6 @@
 # SHOT Phase 1 인수인계 문서
 
-> 최종 업데이트: 2026-03-18
+> 최종 업데이트: 2026-03-19
 
 ## 프로젝트 개요
 
@@ -10,6 +10,39 @@ SHOT은 핸드폰 카메라로 테니스 코트 라인을 실시간 인식하는
 1. TFLite 모델이 카메라 프레임에서 니어코트 8개 키포인트(9~16번) 검출
 2. ITF 표준 치수 + 호모그래피로 전체 16개 코트 포인트 역산
 3. 코트 라인 오버레이 렌더링
+
+---
+
+## 현재 상태 요약 (2026-03-19)
+
+### 완료된 것
+- ✅ ML 모델 학습 완료 (히트맵 3-stage, 2.41px 오차)
+- ✅ Android 프로젝트 스캐폴딩 (멀티모듈)
+- ✅ Android 빌드 성공 (Gradle 8.9, AGP 8.7.3)
+- ✅ 실기기(USB) 설치 + 실행 성공
+- ✅ 카메라 라이브 프리뷰 동작
+- ✅ ML 추론 파이프라인 연결 (카메라 → 검출 → 호모그래피 → 투영)
+- ✅ 코트 라인 오버레이 렌더링 (Compose Canvas)
+- ✅ 키포인트 시각화 (초록 원)
+- ✅ 상태 표시 (코트 인식됨/부분 인식/미인식)
+- ✅ 디버그 정보 표시 (추론시간, 재투영오차, 키포인트수)
+
+### 현재 문제점
+- ❌ **호모그래피 역산 정밀도 부족**: 니어코트 키포인트는 정확하나, 파코트 투영이 크게 어긋남 (SHOT.jpg 참조)
+- ❌ **False positive**: 카메라를 가려도 "코트 인식됨"으로 판정 (모델 기본출력이 검증 통과)
+- ❌ **방송 화면에서만 테스트됨**: 실제 핸드폰으로 코트를 직접 비추는 테스트 미수행
+- ❌ Android Studio Run 버튼 비활성화 (Gradle sync 문제, ADB 직접 설치로 우회)
+
+### 테스트 스크린샷 분석
+
+| 파일 | 상황 | 결과 |
+|------|------|------|
+| EE.jpg | 방송 영상(아카풀코) 비춤 | 가장 정확. 니어/파코트 오버레이 거의 일치 |
+| RE.jpg | 방송 영상(아카풀코) 비춤 | 니어코트 OK, 파코트 약간 어긋남 |
+| SHOT.jpg | 방송 영상(마이애미) 비춤 | **심각한 오류** - 파코트 투영이 좌측으로 크게 밀림 |
+
+**분석**: 같은 방송 영상이라도 카메라 앵글에 따라 호모그래피 품질이 크게 달라짐.
+모델의 니어코트 키포인트 검출 자체는 정확하지만, 호모그래피 → 파코트 역산 과정에서 오차 증폭.
 
 ---
 
@@ -42,12 +75,13 @@ SHOT/
 | `core/.../ItfCourtSpec.kt` | ITF 규격 16개 좌표 (미터) | 완료 |
 | `camera/.../CameraManager.kt` | CameraX Preview + ImageAnalysis | 완료 |
 | `court-detection/.../CourtKeypointDetector.kt` | TFLite 추론 (NHWC) | 완료 |
-| `court-model/.../HomographyCalculator.kt` | OpenCV findHomography(RANSAC) | 완료 |
+| `court-model/.../HomographyCalculator.kt` | DLT + Jacobi SVD 호모그래피 | 완료 |
 | `court-model/.../CourtProjector.kt` | H⁻¹로 16개 포인트 투영 | 완료 |
 | `court-model/.../HomographyValidator.kt` | 재투영 오차, 행렬식 검증 | 완료 |
 | `court-model/.../TemporalSmoother.kt` | EMA 시간적 평활화 | 완료 |
 | `app/.../CameraViewModel.kt` | 파이프라인 오케스트레이션 | 완료 |
-| `app/.../CameraScreen.kt` | 카메라 프리뷰 Compose UI | 완료 |
+| `app/.../CameraScreen.kt` | 카메라 프리뷰 + 오버레이 Compose UI | 완료 |
+| `app/.../MainActivity.kt` | Hilt 엔트리포인트 | 완료 |
 
 ### 2. ML 학습 파이프라인 (Phase 1B)
 
@@ -56,38 +90,30 @@ SHOT/
 | 파일 | 역할 |
 |------|------|
 | `model.py` | MobileNetV3-Small + 키포인트 회귀 헤드 (1.1M params) |
+| `model_heatmap.py` | **히트맵 기반 키포인트 검출 모델** (MobileNetV3 + decoder) |
 | `dataset.py` | CourtKeypointDataset (JSON 어노테이션 로더) |
 | `augmentations.py` | Albumentations 증강 (색상, 기하, 노이즈, 그림자) |
+| `augmentations_v2.py` | 강한 도메인 갭 축소 augmentation |
 | `train.py` | 학습 루프 (AdamW, CosineAnnealingLR, early stopping) |
+| `train_3stage.py` | 3단계 학습 파이프라인 |
+| `train_compare.py` | 3가지 비교 실험 학습 |
 | `export_tflite.py` | PyTorch → ONNX → onnx2tf → TFLite 변환 |
 | `convert_dataset.py` | yastrebksv 14-keypoint → SHOT 8-keypoint 변환 |
+| `youtube_collect.py` | YouTube 검색 + URL 수집 |
+| `extract_frames.py` | yt-dlp 다운로드 + 프레임 추출 |
+| `predict_and_preview.py` | 모델 예측 + 시각적 미리보기 |
+| `review_data.py` | 대화형 검수 도구 |
+| `labeling_tool.py` | 브라우저 기반 키포인트 라벨링 도구 |
 
 ### 3. 모델 학습 결과
 
-**데이터셋**: yastrebksv/TennisCourtDetector (방송 카메라 영상)
-- 8,810장 (14 키포인트 → SHOT 8 키포인트 매핑)
-- Train/Val: 80/20 split
-- 이미지 해상도: 1280x720
+**히트맵 3-Stage 학습 최종 결과: 평균 오차 2.41px** 🎯
 
-**학습 설정:**
-- Optimizer: AdamW (lr=0.001, weight_decay=1e-4)
-- Scheduler: CosineAnnealingLR (T_max=100)
-- Batch size: 32
-- Early stopping: patience=15
-- Loss: SmoothL1(좌표) + 0.5 * BCE(신뢰도), 키포인트별 가중치 차등
-
-**결과 (best model, epoch 57, val_loss=0.0053):**
-
-| 키포인트 | 설명 | 오차(px/256) | 목표(px) | 달성 |
-|----------|------|-------------|---------|------|
-| Pt9  | 서비스라인 좌 (singles left) | 5.32 | <3 | X |
-| Pt10 | 서비스라인 중앙 (center mark) | 4.88 | <3 | X |
-| Pt11 | 서비스라인 우 (singles right) | 7.70 | <3 | X |
-| Pt12 | 베이스라인 복식 좌 (doubles left) | 6.47 | <4 | X |
-| Pt13 | 베이스라인 단식 좌 (singles left) | 6.86 | <4 | X |
-| Pt14 | 베이스라인 중앙 (center mark) | 5.22 | <2 | X |
-| Pt15 | 베이스라인 단식 우 (singles right) | 5.32 | <4 | X |
-| Pt16 | 베이스라인 복식 우 (doubles right) | 4.95 | <4 | X |
+| Stage | 내용 | 오차(px) |
+|-------|------|----------|
+| Stage 1 | Broadcast 8,841장 pretrain | 13.86 |
+| Stage 2 | Mixed 50:50 oversampling | **2.41** ⭐ |
+| Stage 3 | Phone 272장 fine-tune | 2.48 |
 
 **TFLite 모델:**
 - 크기: 4.25 MB (FP32), 목표 <10MB 달성
@@ -95,43 +121,89 @@ SHOT/
 - 출력: `[1, 24]` float32 (8 keypoints × [x, y, confidence])
 - 배치 위치: `court-detection/src/main/assets/court_keypoint.tflite`
 
+### 4. Android 빌드 환경 구축 (2026-03-19)
+
+노트북으로 작업환경 이전 후 발생한 빌드 에러들과 해결:
+
+| 문제 | 원인 | 해결 |
+|------|------|------|
+| `dependencyResolution` 에러 | Gradle 8.9에서 `dependencyResolutionManagement` 필요 | `settings.gradle.kts` 수정 |
+| non-ASCII 경로 에러 | 프로젝트 경로에 한글 (`잡/바탕 화면`) | `gradle.properties`에 `android.overridePathCheck=true` 추가 |
+| `tensorflow-lite-support:2.16.1` 없음 | Google Maven에 해당 버전 없음 | `0.4.4`로 다운그레이드 |
+| `windowKeepScreenOn` 에러 | `themes.xml`에서 style 속성 오류 | `android:keepScreenOn`은 View 속성, theme에서 제거 |
+| `mipmap/ic_launcher` 없음 | 앱 아이콘 리소스 누락 | 기본 아이콘 리소스 생성 |
+| Run ▶ 비활성화 | Gradle sync 실패 / wrapper 누락 | Gradle wrapper 파일 생성 + ADB 직접 설치로 우회 |
+
 ---
 
-## 알려진 이슈 및 한계
+## 알려진 이슈 및 해결 필요 사항
 
-### 1. 도메인 갭 (최대 리스크)
+### 1. 호모그래피 역산 정밀도 (최우선)
 
-현재 모델은 **방송 카메라(높은 앵글, 줌렌즈)** 데이터로만 학습되었다.
-실제 사용 환경은 **핸드폰 카메라(낮은 앵글, 광각)** 이므로 성능 저하가 예상된다.
+**현상**: 니어코트 8개 키포인트는 정확하게 검출되지만, 호모그래피로 역산한 파코트 포인트가 크게 어긋남.
+특히 카메라 앵글이 달라지면 오차가 급격히 증가 (SHOT.jpg vs EE.jpg).
 
-| 항목 | 학습 데이터 (방송) | 실제 환경 (핸드폰) |
-|------|------------------|-------------------|
-| 카메라 높이 | 5~10m | 0.5~3m |
-| 렌즈 | 줌, 좁은 FOV | 광각, 넓은 FOV |
-| 앵글 | 위에서 내려다봄 | 거의 수평 |
-| 왜곡 | 거의 없음 | 광각 왜곡 있음 |
-| 코트 범위 | 전체 코트 | 니어코트 위주 |
+**원인 분석**:
+- DLT + Jacobi SVD 구현체의 수치 안정성 문제 가능성
+- 8개 포인트가 니어코트에 집중되어 있어 파코트 방향 외삽(extrapolation) 시 오차 증폭
+- 호모그래피 H 계산에 사용하는 좌표 정규화가 충분하지 않을 수 있음
 
-**해결 방안:**
-1. 핸드폰으로 직접 촬영한 데이터 100~200장 수집 + 라벨링 → fine-tune
-2. 기존 방송 데이터에 강한 perspective 증강 적용하여 핸드폰 시점 시뮬레이션
-3. 앱이 작동하면 모델 예측값을 초기값으로 사용하여 라벨링 효율화 가능
+**해결 방향**:
+1. OpenCV 네이티브 `findHomography()` 대신 순수 Kotlin DLT 사용 중 → OpenCV JNI 도입 검토
+2. 포인트 수가 부족한 경우(6~7개) 호모그래피 대신 affine transform 사용 검토
+3. 재투영 오차 기반 outlier 제거 (RANSAC) 추가
+4. 파코트 포인트의 범위 제한 (화면 밖으로 너무 멀리 나가지 않도록)
 
-### 2. 키포인트 정확도 미달
+### 2. False Positive 문제
 
-목표 대비 약 1.5~2배 오차. 호모그래피 계산 시 8개 포인트 사용으로 개별 오차 상쇄 가능성 있으나, 검증 필요.
+**현상**: 카메라를 손으로 가려도 "코트 인식됨" 또는 "부분 인식"으로 표시됨.
 
-### 3. Android 빌드 미검증
+**원인**: 모델이 입력 이미지와 관계없이 일관된 "기본 위치" 키포인트를 출력.
+이 기본 위치들이 자기 일관성이 높아서 호모그래피 검증을 통과함.
 
-Gradle 빌드가 실제 Android Studio에서 테스트되지 않았다. 의존성 충돌이나 컴파일 에러 가능성 있음.
+**현재 우회책**: `CameraViewModel`에서 모델 기본출력(검은 이미지의 출력)과 비교하여
+현재 출력이 기본출력과 너무 유사하면 거부하는 로직 추가됨.
+하지만 threshold 튜닝이 부족하여 실제 코트도 거부하는 경우 발생.
 
-### 4. albumentations 경고
+**해결 방향**:
+1. 프레임 간 키포인트 변화량 기반 판정 (카메라 움직임에 키포인트가 반응하는지)
+2. 모델 출력 confidence 패턴 분석 (실제 코트: 일부 키포인트 매우 높고 일부 낮음 vs 비코트: 균일)
+3. 추론 전 이미지 variance 체크 (매우 어두운/단색 이미지 사전 거부)
 
-v2.0.8에서 `OpticalDistortion`의 `shift_limit`, `GaussNoise`의 `var_limit` deprecation 경고 발생. 기능에는 영향 없으나 추후 API 변경 시 수정 필요.
+### 3. 실제 코트 테스트 미수행
+
+지금까지 테스트는 모두 **모니터에 방송 영상을 띄우고 핸드폰으로 촬영**하는 방식.
+실제 코트 옆에서 핸드폰 카메라로 직접 비추는 테스트가 필요함.
+모델은 YouTube 핸드폰 영상으로 학습했으므로 실제 환경에서는 다를 수 있음.
+
+### 4. Android Studio Run 버튼 비활성화
+
+Gradle sync가 완료되지 않아 Run Configuration이 자동 생성되지 않음.
+현재 **ADB 명령어로 직접 설치+실행**하는 방식으로 우회 중.
+
+```bash
+# 빌드
+cd "TENNIS SHOT" && JAVA_HOME="/c/Program Files/Android/Android Studio/jbr" \
+  "/c/Program Files/Android/Android Studio/jbr/bin/java.exe" -Xmx2048m \
+  -cp "gradle/wrapper/gradle-wrapper.jar" org.gradle.wrapper.GradleWrapperMain :app:assembleDebug
+
+# 설치 + 실행
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb shell am start -n com.shot.app/.MainActivity
+```
 
 ---
 
 ## 환경 설정
+
+### Android 빌드 환경
+
+- **Gradle**: 8.9
+- **AGP**: 8.7.3
+- **Kotlin**: 2.0.21
+- **compileSdk**: 35, **minSdk**: 26, **targetSdk**: 35
+- **Java**: 17 (Android Studio JBR)
+- **주의**: 프로젝트 경로에 한글 포함 → `android.overridePathCheck=true` 필수
 
 ### Python ML 환경
 
@@ -140,17 +212,6 @@ v2.0.8에서 `OpticalDistortion`의 `shift_limit`, `GaussNoise`의 `var_limit` d
 cd ml
 python -m uv venv .venv312 --python 3.12
 python -m uv pip install --python .venv312/Scripts/python.exe -r requirements.txt
-
-# 학습 실행
-.venv312/Scripts/python.exe src/train.py \
-  --data data/raw/annotations.json \
-  --image-dir "C:/path/to/tennis_court/images" \
-  --epochs 100 --batch-size 32
-
-# TFLite 변환
-.venv312/Scripts/python.exe src/export_tflite.py \
-  --checkpoint models/best_model.pth \
-  --output ../court-detection/src/main/assets/court_keypoint.tflite
 ```
 
 ### TFLite 변환 파이프라인
@@ -160,13 +221,13 @@ PyTorch (NCHW) → ONNX (opset 18) → onnx2tf → TFLite (NHWC)
 ```
 
 핵심 파라미터: `keep_ncw_or_nchw_or_ncdhw_input_names=["input"]`
-이 옵션 없으면 onnx2tf가 convolution layer에서 에러 발생.
 
 ### 데이터셋
 
-yastrebksv/TennisCourtDetector (MIT 라이선스):
-- 다운로드: Kaggle에서 `yastrebksv/tennis-court-detector` 검색
-- 변환: `python convert_dataset.py --input data/raw/tennis_court --output data/raw/annotations.json --copy-images`
+- **방송 데이터**: yastrebksv/TennisCourtDetector (MIT 라이선스, Kaggle)
+- **핸드폰 데이터**: YouTube 동호인 영상에서 수집 (339장 라벨링 완료)
+  - 프레임: `ml/data/youtube/review/frames/` (360장)
+  - 라벨: `ml/data/youtube/labeled_annotations.json` (339장)
 
 **키포인트 매핑 (yastrebksv → SHOT):**
 
@@ -183,161 +244,31 @@ yastrebksv/TennisCourtDetector (MIT 라이선스):
 
 ---
 
-## 현재 진행 중: YouTube 데이터 수집 파이프라인
-
-### 배경
-
-현재 모델은 **방송 카메라 데이터**로만 학습되어 **핸드폰 카메라 환경에서 도메인 갭** 발생.
-이를 해결하기 위해 YouTube에서 동호인 테니스 영상(핸드폰/고정 카메라 촬영)을 수집하여
-학습 데이터를 보강하는 파이프라인을 구축.
-
-### 핵심 전략
-
-- **한 영상에서 많은 프레임이 아니라, 다양한 영상에서 각 1~3프레임** 추출
-- 고정 카메라 영상이라도 영상 수 자체가 다양성을 보장 (코트, 위치, 높이, 조명 모두 다름)
-- 200개 이상 영상에서 각 1장 = **200개 이상 고유 시점** 확보 가능
-- **자동화는 수집/추출까지만, 학습 데이터 승인은 반드시 수동 검수 후 진행**
-
-### 데이터 파이프라인 워크플로우
-
-```
-[Step 1: 자동] YouTube 검색 → URL 리스트 수집
-    python youtube_collect.py --output data/youtube/video_list.json
-    python youtube_collect.py --url-file data/youtube/manual_urls.txt --skip-search --output data/youtube/video_list.json
-
-[Step 2: 자동] 영상 다운로드 → 대표 프레임 추출
-    python extract_frames.py --input data/youtube/video_list.json --output data/youtube/frames
-
-[Step 3: 자동] 기존 모델로 키포인트 예측 → 미리보기 생성
-    python predict_and_preview.py --frames data/youtube/frames --model models/best_model.pth
-
-[Step 4: 수동] 사람이 직접 검수 (승인/거부)
-    python review_data.py --predictions data/youtube/predictions.json --preview-dir data/youtube/preview
-
-[Step 5: 학습] 검수 완료된 데이터만으로 fine-tune
-    python train.py --data data/youtube/approved_annotations.json --image-dir data/youtube/frames
-```
-
-### 추가된 스크립트 (`ml/src/`)
-
-| 파일 | 역할 |
-|------|------|
-| `youtube_collect.py` | YouTube 검색 + 수동 URL 수집 → video_list.json 생성 |
-| `extract_frames.py` | yt-dlp로 다운로드 + OpenCV로 대표 프레임 추출 |
-| `predict_and_preview.py` | 기존 모델로 키포인트 예측 + 시각적 미리보기 생성 |
-| `review_data.py` | 대화형 검수 도구 (승인/거부/스킵), approved_annotations.json 생성 |
-| `labeling_tool.py` | 브라우저 기반 키포인트 라벨링 도구 (클릭으로 8포인트 지정) |
-| `sync_delete.py` | previews 폴더 삭제 → frames 폴더 자동 동기화 |
-| `train_compare.py` | 3가지 비교 실험 (방송/핸드폰/합산) 학습 + 결과 비교 |
-| `prepare_broadcast_data.py` | yastrebksv 방송 데이터 다운로드 + SHOT 포맷 변환 |
-| `model_heatmap.py` | **히트맵 기반 키포인트 검출 모델** (MobileNetV3 + decoder) |
-| `augmentations_v2.py` | 강한 도메인 갭 축소 augmentation (perspective, 광각, blur 등) |
-| `train_3stage.py` | 3단계 학습 파이프라인 (pretrain → mixed → fine-tune) |
-
-### 수동 URL 리스트
-
-`ml/data/youtube/manual_urls.txt`에 확인 완료된 5개 영상 URL 등록:
-- 아이언쑨 - 테슬로 복식 (14분)
-- 리서땡 - 혼복/잡복 귀뚜라미크린 (30분, 21분)
-- 몽돌브라더스 - 나눔귀뚜라미 (1시간56분, 4분)
-
-### 의존성 추가
-
-기존 `requirements.txt` 외 추가 설치 필요:
-```bash
-pip install yt-dlp opencv-python
-```
-
----
-
-## 완료된 작업: YouTube 데이터 수집 & 라벨링 (2026-03-17)
-
-### 데이터 수집 결과
-- [x] YouTube 자동 검색으로 203개 영상 URL 수집 (11개 검색 쿼리)
-- [x] 프레임 추출: 203개 영상 → 622 프레임 추출
-- [x] 기존 모델로 키포인트 예측 + 미리보기 생성
-- [x] 수동 검수: 쓰레기 데이터 262장 삭제 → **360장** 선별
-- [x] **수동 키포인트 라벨링 완료**: 339장 (브라우저 기반 라벨링 도구 사용)
-
-### 라벨링 데이터 위치
-- 프레임 이미지: `ml/data/youtube/review/frames/` (360장)
-- 라벨 어노테이션: `ml/data/youtube/labeled_annotations.json` (339장)
-- 포맷: SHOT JSON (image, keypoints{9~16: {x, y, visible}})
-
-### 3가지 비교 실험 (FC regression, 2026-03-18 실행)
-
-| 실험 | 학습 데이터 | 핸드폰 테스트 오차 | 비고 |
-|-----|-----------|-----------------|------|
-| A: 방송만 | 1,000장 | 37.06px | 도메인 갭 확인 |
-| B: 핸드폰만 | 272장 | 24.03px | 데이터 부족 |
-| C: 합산 | 1,272장 | 24.95px | 단순 합산 비효과적 |
-
-**결론**: FC regression으로는 목표(2~4px) 달성 불가. 아키텍처 변경 필요.
-
-### 아키텍처 변경: 히트맵 기반 모델 (2026-03-18)
-
-- `model_heatmap.py`: MobileNetV3-Small + ConvTranspose2d decoder → 8채널 64x64 히트맵
-- soft-argmax 버그 발견 → argmax + sub-pixel refinement로 수정 (81px → 1.34px)
-- Stage 1 (방송 2000장 pretrain) 에폭 10에서 27px까지 감소 확인
-- **회사 노트북 GPU(RTX 2070 Super) 불안정** → Google Colab으로 전환
-
----
-
 ## 남은 작업 (우선순위 순)
 
-### ✅ 완료: 히트맵 3-Stage 학습 (2026-03-18, Colab T4)
+### Phase 1C: 검출 파이프라인 품질 개선 (즉시)
 
-**최종 결과: 평균 오차 2.41px** 🎯 (목표 2~4px 달성!)
-
-| Stage | 내용 | 오차(px) |
-|-------|------|----------|
-| Stage 1 | Broadcast 8,841장 pretrain | 13.86 |
-| Stage 2 | Mixed 50:50 oversampling | **2.41** ⭐ |
-| Stage 3 | Phone 272장 fine-tune | 2.48 |
-
-- Stage 2 모델이 최적 (Stage 3은 데이터 부족으로 미세 과적합)
-- 시각화 검증: 랜덤 20장 평균 1.67px, 중앙값 1.62px
-- 모델 저장: Google Drive `SHOT-AI/models/heatmap_stage2_best.pth`
-
-**Colab 학습 시 주의사항:**
-- broadcast 이미지는 256x256 JPEG로 전처리하면 에폭당 600초→90초로 단축
-- `NUM_WORKERS=2` (Colab 권장), `BATCH_SIZE=64`, `pin_memory=True`
-- gdown 대신 Google Drive에서 직접 복사 (rate limit 회피)
-
-### 즉시: Android 앱 통합
-
-1. 히트맵 모델 TFLite 변환 (`export_tflite.py` 히트맵용 수정 필요)
-2. `CourtKeypointDetector.kt` 히트맵 출력 파싱 수정 (기존: [1,24] → 신규: [1,8,64,64])
-3. 카메라 → 검출 → 호모그래피 → 투영 전체 파이프라인 연결
-
-### 📌 나중에: 데이터 추가 확보 (현재 보류)
-> 현재 2.41px로 목표 달성. 추가 데이터 수집은 Android 통합 후 실제 사용에서
-> 부족함이 느껴질 때 진행. Stage 3 과적합 해결을 위해 최소 1,000장 필요.
-
-- [ ] YouTube 영상 추가 수집 → 1,000장+ 목표
-- [ ] 라벨링 도구에 모델 예측 보조 기능 추가 (이제 모델이 정확하므로 효율적)
-- [ ] 수집 후 전체 데이터로 처음부터 재학습 (이어서 학습 X)
-
-### TFLite 변환
-- [ ] 히트맵 모델용 export_tflite.py 수정
-- [ ] INT8 양자화 검토 (현재 FP32 → 모바일 속도 개선용)
-
-### Phase 1C: 검출 파이프라인 통합
-- [ ] Android 빌드 성공 확인 (Android Studio에서)
-- [ ] 카메라 → 검출 → 호모그래피 → 투영 전체 파이프라인 연결
-- [ ] CameraViewModel에서 실시간 오케스트레이션
+1. [ ] 호모그래피 정밀도 개선 (OpenCV JNI 도입 또는 DLT 수치안정성 강화)
+2. [ ] False positive 제거 (프레임간 변화량 + 이미지 variance 기반)
+3. [ ] 실제 코트에서 필드 테스트
+4. [ ] Android Studio Gradle sync 해결 (Run 버튼 활성화)
 
 ### Phase 1D: UI 및 마무리
-- [ ] 코트 라인 오버레이 (Compose Canvas)
-- [ ] 키포인트 신뢰도 시각화
-- [ ] 디버그 모드 (FPS, 추론시간, 재투영 오차)
-- [ ] 설정 화면 (해상도, 단식/복식, 언어)
-- [ ] 영상 녹화 (CameraX VideoCapture)
+
+5. [ ] 설정 화면 (해상도, 단식/복식, 언어)
+6. [ ] 영상 녹화 (CameraX VideoCapture)
+7. [ ] FPS 계산 구현 (현재 TODO 상태)
 
 ### Phase 1E: 검증
-- [ ] 단위 테스트 (호모그래피, 검증, 평활화)
-- [ ] 통합 테스트 (전체 파이프라인)
-- [ ] 완료 게이트: 10초 연속 95% 프레임 성공
+
+8. [ ] 완료 게이트: 10초 연속 95% 프레임 성공
+9. [ ] 20개 다양한 코트에서 테스트
+
+### 향후 (데이터 추가 확보)
+
+- [ ] YouTube 영상 추가 수집 → 1,000장+ 목표
+- [ ] 모델 예측 보조 라벨링으로 효율화
+- [ ] INT8 양자화 검토 (FP32 → 모바일 속도 개선용)
 
 ---
 
@@ -350,7 +281,12 @@ pip install yt-dlp opencv-python
 | `4eabb29` | Phase 1 인수인계 문서 추가 |
 | `62e58fc` | 키포인트 라벨링 도구 + TFLite 미리보기 생성기 |
 | `74bdb09` | YouTube 데이터 수집 파이프라인 추가 |
-| (다음) | 히트맵 모델 + 3단계 학습 + 오답노트 + Colab 노트북 |
+| `dbf8ad2` | 비교 학습 스크립트 + 라벨링 완료 업데이트 |
+| `75e12bb` | 학습 셋업 스크립트 + 데스크탑 전환 업데이트 |
+| `d87bb81` | 히트맵 모델 + 3단계 학습 + Colab 노트북 |
+| `ec065a7` | 히트맵 3-stage 결과 기록: 2.41px 달성 |
+| `0fa22a1` | 인수인계 업데이트: Android 통합 단계 전환 |
+| (현재) | Android 빌드 성공 + 실기기 설치 + 파이프라인 연결 + 테스트 |
 
 **원격 저장소**: https://github.com/kokoro456/SHOT-AI
 

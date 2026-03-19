@@ -5,6 +5,7 @@ composeBom = "2024.12.01"
 composeCompiler = "1.5.15"
 cameraX = "1.4.1"
 tensorflowLite = "2.16.1"
+tfliteSupport = "0.4.4"
 hilt = "2.51.1"
 coroutines = "1.8.1"
 lifecycle = "2.8.7"
@@ -41,7 +42,7 @@ camerax-video = { group = "androidx.camera", name = "camera-video", version.ref 
 # TensorFlow Lite
 tflite = { group = "org.tensorflow", name = "tensorflow-lite", version.ref = "tensorflowLite" }
 tflite-gpu = { group = "org.tensorflow", name = "tensorflow-lite-gpu", version.ref = "tensorflowLite" }
-tflite-support = { group = "org.tensorflow", name = "tensorflow-lite-support", version.ref = "tensorflowLite" }
+tflite-support = { group = "org.tensorflow", name = "tensorflow-lite-support", version.ref = "tfliteSupport" }
 
 # Hilt
 hilt-android = { group = "com.google.dagger", name = "hilt-android", version.ref = "hilt" }

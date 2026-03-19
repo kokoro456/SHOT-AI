@@ -38,9 +38,13 @@ fun CameraScreen(
         // Layer 1: Camera Preview
         AndroidView(
             factory = { context ->
-                PreviewView(context).also { previewView ->
-                    viewModel.bindCamera(previewView)
+                PreviewView(context).apply {
+                    scaleType = PreviewView.ScaleType.FILL_CENTER
+                    implementationMode = PreviewView.ImplementationMode.COMPATIBLE
                 }
+            },
+            update = { previewView ->
+                viewModel.bindCamera(previewView)
             },
             modifier = Modifier.fillMaxSize()
         )
@@ -95,6 +99,32 @@ private fun CourtOverlay(
     val keypointMap = projectedKeypoints.associateBy { it.id }
 
     Canvas(modifier = Modifier.fillMaxSize()) {
+        // Scale from image coordinates to canvas (screen) coordinates.
+        // Camera ImageAnalysis is set to 1280x720, but the actual resolution
+        // may differ. The model outputs normalized coords scaled to image size.
+        // FILL_CENTER crops to fill, so we need to account for aspect ratio.
+        val imageAspect = 1280f / 720f
+        val canvasAspect = size.width / size.height
+
+        val scaleX: Float
+        val scaleY: Float
+        val offsetX: Float
+        val offsetY: Float
+
+        if (imageAspect > canvasAspect) {
+            // Image is wider than canvas → image is cropped on left/right
+            scaleY = size.height / 720f
+            scaleX = scaleY
+            offsetX = (size.width - 1280f * scaleX) / 2f
+            offsetY = 0f
+        } else {
+            // Image is taller than canvas → image is cropped on top/bottom
+            scaleX = size.width / 1280f
+            scaleY = scaleX
+            offsetX = 0f
+            offsetY = (size.height - 720f * scaleY) / 2f
+        }
+
         // Draw court lines
         val lineColor = Color.Green.copy(alpha = 0.8f)
         val lineWidth = 3f
@@ -104,8 +134,8 @@ private fun CourtOverlay(
             val end = keypointMap[endId] ?: continue
             drawLine(
                 color = lineColor,
-                start = Offset(start.x, start.y),
-                end = Offset(end.x, end.y),
+                start = Offset(start.x * scaleX + offsetX, start.y * scaleY + offsetY),
+                end = Offset(end.x * scaleX + offsetX, end.y * scaleY + offsetY),
                 strokeWidth = lineWidth
             )
         }
@@ -120,13 +150,13 @@ private fun CourtOverlay(
             drawCircle(
                 color = color,
                 radius = 8f,
-                center = Offset(kp.x, kp.y)
+                center = Offset(kp.x * scaleX + offsetX, kp.y * scaleY + offsetY)
             )
             if (isDebugMode) {
                 drawCircle(
                     color = color,
                     radius = 12f,
-                    center = Offset(kp.x, kp.y),
+                    center = Offset(kp.x * scaleX + offsetX, kp.y * scaleY + offsetY),
                     style = Stroke(width = 2f)
                 )
             }

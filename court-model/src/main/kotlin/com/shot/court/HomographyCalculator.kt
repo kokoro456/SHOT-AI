@@ -7,27 +7,17 @@ import com.shot.core.model.Keypoint
  * Computes the homography matrix that maps image pixel coordinates to
  * ITF court coordinates (meters), and vice versa.
  *
- * Uses the Direct Linear Transform (DLT) algorithm, avoiding OpenCV dependency.
- * For production, consider replacing with OpenCV findHomography(RANSAC) for
- * better outlier rejection.
- *
- * Mathematical definition:
- * - H maps image → court: p_court = H × p_image
- * - H_inv maps court → image: p_image = H_inv × p_court (for overlay rendering)
+ * Uses the Direct Linear Transform (DLT) algorithm with SVD.
  */
 class HomographyCalculator {
 
     /**
      * Compute homography from detected keypoints.
-     *
-     * @param detectedKeypoints List of keypoints with image pixel coordinates (minimum 6)
-     * @return 3x3 homography matrix as FloatArray (row-major), or null if computation fails
      */
     fun computeHomography(detectedKeypoints: List<Keypoint>): FloatArray? {
-        val validKeypoints = detectedKeypoints.filter { it.isReliable() }
+        val validKeypoints = detectedKeypoints.filter { it.confidence > 0.05f }
         if (validKeypoints.size < 4) return null
 
-        // Build corresponding point pairs: image coords ↔ court coords
         val pairs = mutableListOf<Pair<FloatArray, FloatArray>>()
         for (kp in validKeypoints) {
             val courtPoint = ItfCourtSpec.KEYPOINTS[kp.id] ?: continue
@@ -37,14 +27,9 @@ class HomographyCalculator {
         }
 
         if (pairs.size < 4) return null
-
-        // Compute homography using DLT (Direct Linear Transform)
         return computeDLT(pairs)
     }
 
-    /**
-     * Project a court coordinate (meters) to image coordinates (pixels) using H_inv.
-     */
     fun projectCourtToImage(courtX: Float, courtY: Float, hInv: FloatArray): FloatArray {
         val w = hInv[6] * courtX + hInv[7] * courtY + hInv[8]
         if (Math.abs(w) < 1e-10f) return floatArrayOf(Float.NaN, Float.NaN)
@@ -53,9 +38,6 @@ class HomographyCalculator {
         return floatArrayOf(x, y)
     }
 
-    /**
-     * Project an image coordinate (pixels) to court coordinates (meters) using H.
-     */
     fun projectImageToCourt(imageX: Float, imageY: Float, h: FloatArray): FloatArray {
         val w = h[6] * imageX + h[7] * imageY + h[8]
         if (Math.abs(w) < 1e-10f) return floatArrayOf(Float.NaN, Float.NaN)
@@ -64,9 +46,6 @@ class HomographyCalculator {
         return floatArrayOf(x, y)
     }
 
-    /**
-     * Compute inverse of a 3x3 matrix (row-major FloatArray).
-     */
     fun invertHomography(h: FloatArray): FloatArray? {
         val det = h[0] * (h[4] * h[8] - h[5] * h[7]) -
                 h[1] * (h[3] * h[8] - h[5] * h[6]) +
@@ -88,40 +67,33 @@ class HomographyCalculator {
         )
     }
 
-    /**
-     * DLT (Direct Linear Transform) algorithm for homography estimation.
-     *
-     * Given N >= 4 point correspondences (src_i, dst_i), finds H such that
-     * dst_i ≈ H × src_i (in homogeneous coordinates).
-     *
-     * Uses normalization for numerical stability.
-     */
     private fun computeDLT(pairs: List<Pair<FloatArray, FloatArray>>): FloatArray? {
         val n = pairs.size
 
         // Normalize source points (image coordinates)
-        val srcMeanX = pairs.map { it.first[0] }.average().toFloat()
-        val srcMeanY = pairs.map { it.first[1] }.average().toFloat()
-        val srcScale = pairs.map {
+        val srcMeanX = pairs.map { it.first[0].toDouble() }.average()
+        val srcMeanY = pairs.map { it.first[1].toDouble() }.average()
+        val srcAvgDist = pairs.map {
             Math.sqrt(
-                ((it.first[0] - srcMeanX) * (it.first[0] - srcMeanX) +
-                        (it.first[1] - srcMeanY) * (it.first[1] - srcMeanY)).toDouble()
+                (it.first[0] - srcMeanX) * (it.first[0] - srcMeanX) +
+                        (it.first[1] - srcMeanY) * (it.first[1] - srcMeanY)
             )
-        }.average().toFloat().let { if (it < 1e-10f) 1f else Math.sqrt(2.0).toFloat() / it }
+        }.average()
+        val srcScale = if (srcAvgDist < 1e-10) 1.0 else Math.sqrt(2.0) / srcAvgDist
 
         // Normalize destination points (court coordinates)
-        val dstMeanX = pairs.map { it.second[0] }.average().toFloat()
-        val dstMeanY = pairs.map { it.second[1] }.average().toFloat()
-        val dstScale = pairs.map {
+        val dstMeanX = pairs.map { it.second[0].toDouble() }.average()
+        val dstMeanY = pairs.map { it.second[1].toDouble() }.average()
+        val dstAvgDist = pairs.map {
             Math.sqrt(
-                ((it.second[0] - dstMeanX) * (it.second[0] - dstMeanX) +
-                        (it.second[1] - dstMeanY) * (it.second[1] - dstMeanY)).toDouble()
+                (it.second[0] - dstMeanX) * (it.second[0] - dstMeanX) +
+                        (it.second[1] - dstMeanY) * (it.second[1] - dstMeanY)
             )
-        }.average().toFloat().let { if (it < 1e-10f) 1f else Math.sqrt(2.0).toFloat() / it }
+        }.average()
+        val dstScale = if (dstAvgDist < 1e-10) 1.0 else Math.sqrt(2.0) / dstAvgDist
 
-        // Build the 2N x 9 matrix A for Ah = 0
-        val rows = n * 2
-        val a = Array(rows) { DoubleArray(9) }
+        // Build the 2N x 9 matrix A
+        val a = Array(n * 2) { DoubleArray(9) }
 
         for (i in 0 until n) {
             val sx = (pairs[i].first[0] - srcMeanX) * srcScale
@@ -129,72 +101,21 @@ class HomographyCalculator {
             val dx = (pairs[i].second[0] - dstMeanX) * dstScale
             val dy = (pairs[i].second[1] - dstMeanY) * dstScale
 
-            // Row 2i
-            a[2 * i][0] = -sx.toDouble()
-            a[2 * i][1] = -sy.toDouble()
-            a[2 * i][2] = -1.0
-            a[2 * i][3] = 0.0
-            a[2 * i][4] = 0.0
-            a[2 * i][5] = 0.0
-            a[2 * i][6] = (dx * sx).toDouble()
-            a[2 * i][7] = (dx * sy).toDouble()
-            a[2 * i][8] = dx.toDouble()
+            a[2 * i][0] = -sx; a[2 * i][1] = -sy; a[2 * i][2] = -1.0
+            a[2 * i][3] = 0.0; a[2 * i][4] = 0.0; a[2 * i][5] = 0.0
+            a[2 * i][6] = dx * sx; a[2 * i][7] = dx * sy; a[2 * i][8] = dx
 
-            // Row 2i + 1
-            a[2 * i + 1][0] = 0.0
-            a[2 * i + 1][1] = 0.0
-            a[2 * i + 1][2] = 0.0
-            a[2 * i + 1][3] = -sx.toDouble()
-            a[2 * i + 1][4] = -sy.toDouble()
-            a[2 * i + 1][5] = -1.0
-            a[2 * i + 1][6] = (dy * sx).toDouble()
-            a[2 * i + 1][7] = (dy * sy).toDouble()
-            a[2 * i + 1][8] = dy.toDouble()
+            a[2 * i + 1][0] = 0.0; a[2 * i + 1][1] = 0.0; a[2 * i + 1][2] = 0.0
+            a[2 * i + 1][3] = -sx; a[2 * i + 1][4] = -sy; a[2 * i + 1][5] = -1.0
+            a[2 * i + 1][6] = dy * sx; a[2 * i + 1][7] = dy * sy; a[2 * i + 1][8] = dy
         }
 
-        // Solve using SVD (simplified: use ATA eigenvalue decomposition)
-        val h = solveHomogeneous(a) ?: return null
-
-        // Denormalize: H = T_dst_inv × H_normalized × T_src
-        val tSrc = floatArrayOf(
-            srcScale, 0f, -srcMeanX * srcScale,
-            0f, srcScale, -srcMeanY * srcScale,
-            0f, 0f, 1f
-        )
-        val tDstInv = floatArrayOf(
-            1f / dstScale, 0f, dstMeanX,
-            0f, 1f / dstScale, dstMeanY,
-            0f, 0f, 1f
-        )
-
-        val hNorm = floatArrayOf(
-            h[0].toFloat(), h[1].toFloat(), h[2].toFloat(),
-            h[3].toFloat(), h[4].toFloat(), h[5].toFloat(),
-            h[6].toFloat(), h[7].toFloat(), h[8].toFloat()
-        )
-
-        // Result = T_dst_inv × H_norm × T_src
-        val temp = multiply3x3(hNorm, tSrc)
-        return multiply3x3(tDstInv, temp)
-    }
-
-    /**
-     * Solve the homogeneous system Ah = 0 by finding the eigenvector
-     * corresponding to the smallest eigenvalue of A^T A.
-     *
-     * Uses power iteration on (A^T A)^(-1) for the smallest eigenvalue.
-     * For better numerical stability, a proper SVD library should be used.
-     */
-    private fun solveHomogeneous(a: Array<DoubleArray>): DoubleArray? {
-        val rows = a.size
-        val cols = 9
-
-        // Compute A^T A (9x9 symmetric matrix)
-        val ata = Array(cols) { DoubleArray(cols) }
-        for (i in 0 until cols) {
-            for (j in i until cols) {
+        // Compute A^T * A (9x9 symmetric)
+        val ata = Array(9) { DoubleArray(9) }
+        for (i in 0 until 9) {
+            for (j in i until 9) {
                 var sum = 0.0
-                for (k in 0 until rows) {
+                for (k in 0 until n * 2) {
                     sum += a[k][i] * a[k][j]
                 }
                 ata[i][j] = sum
@@ -202,47 +123,61 @@ class HomographyCalculator {
             }
         }
 
-        // Find smallest eigenvector using inverse power iteration
-        // First, add a small regularization to avoid singularity
-        for (i in 0 until cols) {
-            ata[i][i] += 1e-12
-        }
+        // Find eigenvector of smallest eigenvalue using Jacobi iteration
+        val h = smallestEigenvectorJacobi(ata, 9) ?: return null
 
-        // Use simple Jacobi eigenvalue algorithm for 9x9 symmetric matrix
-        return smallestEigenvector(ata)
+        // Denormalize: H = T_dst_inv × H_normalized × T_src
+        val tSrc = doubleArrayOf(
+            srcScale, 0.0, -srcMeanX * srcScale,
+            0.0, srcScale, -srcMeanY * srcScale,
+            0.0, 0.0, 1.0
+        )
+        val tDstInv = doubleArrayOf(
+            1.0 / dstScale, 0.0, dstMeanX,
+            0.0, 1.0 / dstScale, dstMeanY,
+            0.0, 0.0, 1.0
+        )
+        val hNorm = h.copyOf()
+
+        val temp = multiply3x3d(hNorm, tSrc)
+        val result = multiply3x3d(tDstInv, temp)
+
+        // Normalize so result[8] = 1
+        val scale = result[8]
+        if (Math.abs(scale) < 1e-15) return null
+
+        return FloatArray(9) { (result[it] / scale).toFloat() }
     }
 
     /**
-     * Find the eigenvector corresponding to the smallest eigenvalue
-     * of a symmetric matrix using Jacobi iteration.
+     * Jacobi eigenvalue algorithm for 9x9 symmetric matrix.
+     * Returns eigenvector corresponding to the smallest eigenvalue.
+     * Uses 200 iterations for better convergence.
      */
-    private fun smallestEigenvector(matrix: Array<DoubleArray>): DoubleArray? {
-        val n = matrix.size
-        val maxIter = 100
-
-        // Copy matrix
+    private fun smallestEigenvectorJacobi(matrix: Array<DoubleArray>, n: Int): DoubleArray? {
         val a = Array(n) { matrix[it].copyOf() }
         val v = Array(n) { DoubleArray(n) }
         for (i in 0 until n) v[i][i] = 1.0
 
-        for (iter in 0 until maxIter) {
+        for (iter in 0 until 200) {
             // Find largest off-diagonal element
             var maxVal = 0.0
             var p = 0
             var q = 1
             for (i in 0 until n) {
                 for (j in i + 1 until n) {
-                    if (Math.abs(a[i][j]) > maxVal) {
-                        maxVal = Math.abs(a[i][j])
+                    val absVal = Math.abs(a[i][j])
+                    if (absVal > maxVal) {
+                        maxVal = absVal
                         p = i
                         q = j
                     }
                 }
             }
 
-            if (maxVal < 1e-12) break
+            if (maxVal < 1e-15) break
 
-            // Compute rotation
+            // Compute Jacobi rotation angle
             val theta = if (Math.abs(a[p][p] - a[q][q]) < 1e-15) {
                 Math.PI / 4.0
             } else {
@@ -252,10 +187,9 @@ class HomographyCalculator {
             val c = Math.cos(theta)
             val s = Math.sin(theta)
 
-            // Apply rotation to a
+            // Apply rotation to matrix A
             val app = c * c * a[p][p] + 2 * s * c * a[p][q] + s * s * a[q][q]
             val aqq = s * s * a[p][p] - 2 * s * c * a[p][q] + c * c * a[q][q]
-
             a[p][q] = 0.0
             a[q][p] = 0.0
             a[p][p] = app
@@ -265,10 +199,8 @@ class HomographyCalculator {
                 if (i != p && i != q) {
                     val aip = c * a[i][p] + s * a[i][q]
                     val aiq = -s * a[i][p] + c * a[i][q]
-                    a[i][p] = aip
-                    a[p][i] = aip
-                    a[i][q] = aiq
-                    a[q][i] = aiq
+                    a[i][p] = aip; a[p][i] = aip
+                    a[i][q] = aiq; a[q][i] = aiq
                 }
             }
 
@@ -291,15 +223,11 @@ class HomographyCalculator {
             }
         }
 
-        // Return corresponding eigenvector
         return DoubleArray(n) { v[it][minIdx] }
     }
 
-    /**
-     * Multiply two 3x3 matrices (row-major FloatArray).
-     */
-    private fun multiply3x3(a: FloatArray, b: FloatArray): FloatArray {
-        return floatArrayOf(
+    private fun multiply3x3d(a: DoubleArray, b: DoubleArray): DoubleArray {
+        return doubleArrayOf(
             a[0] * b[0] + a[1] * b[3] + a[2] * b[6],
             a[0] * b[1] + a[1] * b[4] + a[2] * b[7],
             a[0] * b[2] + a[1] * b[5] + a[2] * b[8],

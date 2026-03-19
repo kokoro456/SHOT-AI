@@ -65,6 +65,9 @@ dependencies {
     implementation(libs.lifecycle.viewmodel.compose)
     implementation(libs.navigation.compose)
 
+    // CameraX (for PreviewView in UI)
+    implementation(libs.camerax.view)
+
     // Hilt
     implementation(libs.hilt.android)
     ksp(libs.hilt.compiler)
