@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -35,7 +34,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -55,6 +53,7 @@ import com.shot.core.R
 import com.shot.core.model.ConfidenceLevel
 import com.shot.core.model.DetectionStatus
 import com.shot.core.model.Keypoint
+import com.shot.detection.BallTrackingDetector
 
 // --- Color System ---
 private object ShotColors {
@@ -86,6 +85,7 @@ fun CameraScreen(
     viewModel: CameraViewModel = hiltViewModel()
 ) {
     val detectionResult by viewModel.detectionResult.collectAsState()
+    val ballPosition by viewModel.ballPosition.collectAsState()
     val isDebugMode by viewModel.isDebugMode.collectAsState()
 
     // FPS calculation
@@ -126,6 +126,12 @@ fun CameraScreen(
             isDebugMode = isDebugMode
         )
 
+        // Layer 2.5: Ball Position Overlay
+        BallOverlay(
+            ballPosition = ballPosition,
+            isDebugMode = isDebugMode
+        )
+
         // Layer 3: Top bar — Status pill (Dynamic Island style)
         StatusPill(
             status = detectionResult.status,
@@ -146,7 +152,7 @@ fun CameraScreen(
                 .align(Alignment.BottomStart)
                 .padding(12.dp)
         ) {
-            DebugPanel(result = detectionResult, fps = fps)
+            DebugPanel(result = detectionResult, fps = fps, ballPosition = ballPosition)
         }
 
         // Layer 5: Camera guide (centered, when not detected)
@@ -344,6 +350,92 @@ private fun CourtOverlay(
     }
 }
 
+// --- Ball Position Overlay ---
+@Composable
+private fun BallOverlay(
+    ballPosition: BallTrackingDetector.BallPosition?,
+    isDebugMode: Boolean
+) {
+    if (ballPosition == null || !ballPosition.detected) return
+
+    Canvas(modifier = Modifier.fillMaxSize()) {
+        val imageAspect = 1280f / 720f
+        val canvasAspect = size.width / size.height
+
+        val scaleX: Float
+        val scaleY: Float
+        val offsetX: Float
+        val offsetY: Float
+
+        if (imageAspect > canvasAspect) {
+            scaleY = size.height / 720f
+            scaleX = scaleY
+            offsetX = (size.width - 1280f * scaleX) / 2f
+            offsetY = 0f
+        } else {
+            scaleX = size.width / 1280f
+            scaleY = scaleX
+            offsetX = 0f
+            offsetY = (size.height - 720f * scaleY) / 2f
+        }
+
+        val center = Offset(
+            ballPosition.x * scaleX + offsetX,
+            ballPosition.y * scaleY + offsetY
+        )
+
+        val ballColor = Color(0xFFFF6D00) // Vivid orange for ball
+
+        // Outer glow pulse
+        drawCircle(
+            brush = Brush.radialGradient(
+                colors = listOf(
+                    ballColor.copy(alpha = 0.4f),
+                    ballColor.copy(alpha = 0f)
+                ),
+                center = center,
+                radius = 28f
+            ),
+            radius = 28f,
+            center = center
+        )
+
+        // Core dot
+        drawCircle(
+            color = ballColor,
+            radius = 7f,
+            center = center
+        )
+
+        // White border ring
+        drawCircle(
+            color = Color.White.copy(alpha = 0.8f),
+            radius = 7f,
+            center = center,
+            style = Stroke(width = 1.8f)
+        )
+
+        // Crosshair lines (subtle)
+        val crossLen = 14f
+        val crossColor = ballColor.copy(alpha = 0.6f)
+        drawLine(crossColor, Offset(center.x - crossLen, center.y), Offset(center.x - 9f, center.y), strokeWidth = 1.2f, cap = StrokeCap.Round)
+        drawLine(crossColor, Offset(center.x + 9f, center.y), Offset(center.x + crossLen, center.y), strokeWidth = 1.2f, cap = StrokeCap.Round)
+        drawLine(crossColor, Offset(center.x, center.y - crossLen), Offset(center.x, center.y - 9f), strokeWidth = 1.2f, cap = StrokeCap.Round)
+        drawLine(crossColor, Offset(center.x, center.y + 9f), Offset(center.x, center.y + crossLen), strokeWidth = 1.2f, cap = StrokeCap.Round)
+
+        if (isDebugMode) {
+            // Confidence ring scaled by confidence value
+            val confRadius = 12f + ballPosition.confidence * 8f
+            drawCircle(
+                color = ballColor.copy(alpha = 0.35f),
+                radius = confRadius,
+                center = center,
+                style = Stroke(width = 1.5f)
+            )
+        }
+    }
+}
+
 // --- Camera Guide ---
 @Composable
 private fun CameraGuide() {
@@ -398,6 +490,7 @@ private fun CameraGuide() {
 private fun DebugPanel(
     result: com.shot.core.model.CourtDetectionResult,
     fps: Float,
+    ballPosition: BallTrackingDetector.BallPosition?,
     modifier: Modifier = Modifier
 ) {
     Column(
@@ -412,6 +505,18 @@ private fun DebugPanel(
         DebugRow("Keypoints", "${result.reliableKeypointCount}/8")
         DebugRow("Projected", "${result.projectedKeypoints.size}/16")
         DebugRow("Status", result.status.name)
+
+        // Ball tracking info
+        Spacer(modifier = Modifier.height(4.dp))
+        if (ballPosition != null) {
+            DebugRow("Ball", if (ballPosition.detected) "DETECTED" else "---")
+            DebugRow("Ball Conf", "${"%.2f".format(ballPosition.confidence)}")
+            if (ballPosition.detected) {
+                DebugRow("Ball Pos", "${"%.0f".format(ballPosition.x)}, ${"%.0f".format(ballPosition.y)}")
+            }
+        } else {
+            DebugRow("Ball", "INIT...")
+        }
     }
 }
 

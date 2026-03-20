@@ -32,6 +32,15 @@ __pycache__/
 .eggs/
 dist/
 
+# Ball tracking dataset (too large for git)
+ball data/
+ml/shot_ml_src.zip
+ml/tflite_coord/
+
+# Tool configs
+.claude/
+.superpowers/
+
 # OS
 .DS_Store
 Thumbs.db

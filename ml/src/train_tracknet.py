@@ -73,15 +73,26 @@ class TrackNetDataset(Dataset):
         for vid in video_frames:
             video_frames[vid].sort(key=lambda x: x[0])
 
+        # Filter out annotations whose frame files don't exist
+        existing = set(os.listdir(str(self.frames_dir))) if self.frames_dir.is_dir() else set()
+
         # Create triplets: (frame_t-2, frame_t-1, frame_t) with label for frame_t
         self.samples = []
+        skipped = 0
         for vid, frames in video_frames.items():
+            # Filter frames with missing files
+            frames = [(idx, ann) for idx, ann in frames
+                      if not existing or ann["image"] in existing]
             for i in range(len(frames)):
                 # Get 3 consecutive frames (or repeat if not enough)
                 f0 = frames[max(0, i - 2)][1]
                 f1 = frames[max(0, i - 1)][1]
                 f2 = frames[i][1]
                 self.samples.append((f0, f1, f2))
+
+        if existing and len(self.samples) < len(annotations):
+            skipped = len(annotations) - len(self.samples)
+            print(f"  Skipped {skipped} samples (missing frame files)")
 
     def __len__(self):
         return len(self.samples)
@@ -249,10 +260,18 @@ def main():
     train_dataset = TrackNetDataset(train_ann, args.frames, augment=True)
     val_dataset = TrackNetDataset(val_ann, args.frames, augment=False)
 
+    print(f"\n=== Training Data Summary ===")
+    print(f"Train triplets: {len(train_dataset)} (from {len(train_ann)} annotations)")
+    print(f"Val triplets:   {len(val_dataset)} (from {len(val_ann)} annotations)")
+    print(f"Total samples:  {len(train_dataset) + len(val_dataset)}")
+    print(f"=============================\n")
+
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size,
-                              shuffle=True, num_workers=0, pin_memory=True)
+                              shuffle=True, num_workers=4, pin_memory=True,
+                              persistent_workers=True)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size,
-                            shuffle=False, num_workers=0, pin_memory=True)
+                            shuffle=False, num_workers=4, pin_memory=True,
+                            persistent_workers=True)
 
     # Model
     model = TrackNet(input_channels=9, base_filters=32).to(device)

@@ -1,6 +1,6 @@
 # SHOT Phase 1 인수인계 문서
 
-> 최종 업데이트: 2026-03-19
+> 최종 업데이트: 2026-03-20
 
 ## 프로젝트 개요
 
@@ -34,20 +34,52 @@ SHOT은 핸드폰 카메라로 테니스 코트 라인을 실시간 인식하는
 - ✅ 라벨링 도구 개선: 같은 영상 그룹 라벨 복사 기능
 
 ### 현재 문제점
-- ❌ **실제 코트 필드 테스트 미수행**: 모니터 스크린샷 테스트에서 개선 확인했으나 실제 코트 테스트 필요
 - ❌ **TFLite 변환 불가**: onnx2tf가 decoder의 skip connection을 처리 못함 → ONNX Runtime 사용 중
 - ❌ Android Studio Run 버튼 비활성화 (Gradle sync 문제, ADB 직접 설치로 우회)
+- ⚠️ **코트 인식 품질 문제** (아래 "실제 코트 필드 테스트" 참조) — 나중에 재작업 필요
 
-### 테스트 스크린샷 분석
+### 모니터 테스트 스크린샷 분석
 
 | 파일 | 상황 | 결과 |
 |------|------|------|
 | EE.jpg | 방송 영상(아카풀코) 비춤 | 가장 정확. 니어/파코트 오버레이 거의 일치 |
 | RE.jpg | 방송 영상(아카풀코) 비춤 | 니어코트 OK, 파코트 약간 어긋남 |
 | SHOT.jpg | 방송 영상(마이애미) 비춤 | **심각한 오류** - 파코트 투영이 좌측으로 크게 밀림 |
+| AA.jpg | 실내 코트(Clean Tennis) | 니어코트 대략 맞으나 파코트 투영 크게 어긋남 |
 
-**분석**: 같은 방송 영상이라도 카메라 앵글에 따라 호모그래피 품질이 크게 달라짐.
-모델의 니어코트 키포인트 검출 자체는 정확하지만, 호모그래피 → 파코트 역산 과정에서 오차 증폭.
+### 실제 코트 필드 테스트 (2026-03-20, UNYEON PRIME 야간 클레이코트)
+
+**테스트 환경**: 야외 클레이코트, 야간 조명, 핸드폰(갤럭시) 직접 촬영
+
+| # | 상태 표시 | 분석 |
+|---|----------|------|
+| 1 | 코트 인식됨 (초록) | **가장 좋은 결과**. 니어코트 키포인트가 실제 라인과 꽤 정확하게 일치 |
+| 2 | 코트를 인식할 수 없습니다 (빨강) | 거의 같은 앵글인데 미인식 (**False Negative**) |
+| 3 | 부분적으로 인식됨 (노랑) | 니어코트 라인이 실제와 상당히 잘 맞음. 서비스/사이드라인 양호 |
+| 4 | 부분적으로 인식됨 (노랑) | 비스듬한 앵글. 오버레이가 실제 라인과 크게 불일치 |
+| 5 | 코트를 인식할 수 없습니다 (빨강) | 코트가 잘 보이는데도 미인식 (**False Negative**) |
+
+**핵심 발견:**
+1. **니어코트 검출은 작동함** — 1, 3번에서 실제 라인과 잘 맞음 (모델 자체는 유효)
+2. **False Negative가 주요 문제** — 코트가 보이는데도 거부 (검증 기준 과도하게 엄격)
+3. **프레임 간 불안정** — 같은 위치에서 인식됨/미인식 왔다갔다
+4. **비스듬한 앵글에서 왜곡** — 학습 데이터에 부족한 구도
+5. **야간 + 클레이코트 환경** — 학습 데이터에 이 환경이 부족할 수 있음
+
+**적용한 조치 (2026-03-20):**
+- `isRealDetection` 기준 완화: meanConf 0.5→0.3, confStd 0.25→0.35, reliableCount 6@0.7→4@0.5
+- 상태 판정 완화: DETECTED reproj<20→30, PARTIAL reproj<50→80
+- 파코트 필터링 강화: 마진 50%→20%, nearMinY 사용, 수직 범위 제한, 5/8 통과 필수
+
+**향후 리마인드 — 코트 인식 품질 개선 과제 (함께 진행):**
+- [ ] 야간/클레이/실외 다양한 환경의 학습 데이터 추가 수집 (현재 대부분 SNTC 실내)
+- [ ] 비스듬한 앵글 학습 데이터 보강
+- [ ] 프레임 간 안정성: 히스테리시스 기반 상태 전환 (N프레임 연속 미인식이어야 NOT_DETECTED로 변경)
+- [ ] 키포인트 개수 부족 시 부분 호모그래피 또는 affine transform 사용 검토
+- [ ] OpenCV JNI 도입으로 findHomography + RANSAC 적용 검토
+- [ ] 입력 해상도 256→384 상향으로 원거리 라인 검출력 향상 시도
+- [ ] Android Studio Gradle sync 해결 (Run 버튼 활성화)
+- [ ] 데이터 다양성 확보 (야간/클레이/실외 코트)
 
 ---
 
@@ -85,8 +117,9 @@ SHOT/
 | `court-model/.../HomographyValidator.kt` | 재투영 오차, 행렬식 검증 | 완료 |
 | `court-model/.../TemporalSmoother.kt` | EMA 시간적 평활화 | 완료 |
 | `app/.../CameraViewModel.kt` | 파이프라인 오케스트레이션 | 완료 |
-| `app/.../CameraScreen.kt` | 카메라 프리뷰 + 오버레이 Compose UI | 완료 |
+| `app/.../CameraScreen.kt` | 카메라 프리뷰 + 코트/볼 오버레이 Compose UI | 완료 |
 | `app/.../MainActivity.kt` | Hilt 엔트리포인트 | 완료 |
+| `court-detection/.../BallTrackingDetector.kt` | TrackNet ONNX 추론 (3-frame, heatmap) | 완료 |
 
 ### 2. ML 학습 파이프라인 (Phase 1B)
 
@@ -109,6 +142,12 @@ SHOT/
 | `predict_and_preview.py` | 모델 예측 + 시각적 미리보기 |
 | `review_data.py` | 대화형 검수 도구 |
 | `labeling_tool.py` | 브라우저 기반 키포인트 라벨링 도구 |
+| `train_tracknet.py` | TrackNet 볼 추적 모델 학습 (video-level split, early stopping) |
+| `convert_tracknet_dataset.py` | TrackNet Dataset-001 → JSON 변환 |
+| `export_tracknet_onnx.py` | TrackNet PyTorch → ONNX 변환 + 검증 |
+| `augmentations_ball.py` | 3-frame triplet 증강 (밝기, 색상, 노이즈, flip) |
+| `label_ball.py` | 볼 위치 라벨링 도구 (비디오 그룹 탐색) |
+| `review_ball_data.py` | 볼 어노테이션 검수 도구 |
 
 ### 3. 모델 학습 결과
 
@@ -125,6 +164,31 @@ SHOT/
 - 입력: `[1, 3, 256, 256]` NCHW float32, ImageNet 정규화
 - 출력: 8 keypoints × [x, y, confidence]
 - 배치 위치: `court-detection/src/main/assets/` (ONNX 모델)
+
+### 4. TrackNet 볼 추적 모델 (Phase 2)
+
+**공개 데이터셋**: TrackNet Dataset-001 (19,835 프레임, 10 games, 95 clips)
+
+**모델 아키텍처**: TrackNet v2 (UNet-like, ConvBlock encoder-decoder with skip connections)
+- 입력: `[1, 9, 128, 320]` (3 consecutive RGB frames, NCHW)
+- 출력: `[1, 1, 128, 320]` (Gaussian heatmap)
+- 파라미터: 1,930,145
+- base_filters: 32
+
+**학습 결과** (Kaggle P100, early stopping patience=15):
+- Best epoch: 22 / 37
+- Best val_loss: 0.002171
+- Val Acc: 86.5% (threshold 0.5 기준)
+- Val Err: 1.6px
+- Training: video-level split, Gaussian heatmap (sigma=2.5), BCE loss
+
+**ONNX 변환**: 7.36MB, opset 18, max diff 1.3e-7
+
+**Android 통합**:
+- `BallTrackingDetector.kt`: 3-frame ring buffer, NCHW 전처리 (0-1 정규화, ImageNet 미사용)
+- heatmap argmax → confidence threshold 0.3 → 스케일링된 좌표 출력
+- `CameraViewModel.kt`: 매 프레임 ball detection, `ballPosition` StateFlow
+- `CameraScreen.kt`: BallOverlay (오렌지 마커 + 십자선 + 디버그 신뢰도 링)
 
 ### 4. Android 빌드 환경 구축 (2026-03-19)
 
@@ -273,11 +337,15 @@ ONNX Runtime은 NCHW를 그대로 사용하므로 변환 문제 없음.
 8. [ ] 완료 게이트: 10초 연속 95% 프레임 성공
 9. [ ] 20개 다양한 코트에서 테스트
 
-### Phase 2: TrackNet 공 추적 (향후)
+### Phase 2: TrackNet 공 추적
 
-- [ ] TrackNet 모델 학습 (공 위치 추적)
-- [ ] 공 궤적 기반 착지점 판정
-- [ ] Android 통합
+- [x] TrackNet 모델 학습 (공개 데이터셋 19,835프레임, Kaggle P100)
+- [x] ONNX 변환 (7.36MB, opset 18, max diff 1.3e-7)
+- [x] Android BallTrackingDetector 구현 (3-frame buffer, heatmap argmax)
+- [x] CameraViewModel 통합 (ballPosition StateFlow)
+- [x] CameraScreen BallOverlay UI (오렌지 마커 + 십자선 + 디버그 신뢰도)
+- [ ] **실기기 테스트** (APK 빌드 → 디바이스 배포)
+- [ ] 실기기 결과 기반 재학습 (sigma 3.5, threshold 0.3, resolution 192×480)
 
 ### 향후 (데이터 추가 확보)
 

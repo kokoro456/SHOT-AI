@@ -16,6 +16,7 @@ import com.shot.court.TemporalSmoother
 import com.shot.core.model.CourtDetectionResult
 import com.shot.core.model.DetectionStatus
 import com.shot.core.model.Keypoint
+import com.shot.detection.BallTrackingDetector
 import com.shot.detection.CourtKeypointDetector
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -35,6 +36,7 @@ class CameraViewModel @Inject constructor(
 
     // ML pipeline components
     private val detector = CourtKeypointDetector(application)
+    private val ballDetector = BallTrackingDetector(application)
     private val homographyCalculator = HomographyCalculator()
     private val projector = CourtProjector(homographyCalculator)
     private val validator = HomographyValidator()
@@ -62,6 +64,9 @@ class CameraViewModel @Inject constructor(
 
     private val _detectionResult = MutableStateFlow(CourtDetectionResult.EMPTY)
     val detectionResult: StateFlow<CourtDetectionResult> = _detectionResult.asStateFlow()
+
+    private val _ballPosition = MutableStateFlow<BallTrackingDetector.BallPosition?>(null)
+    val ballPosition: StateFlow<BallTrackingDetector.BallPosition?> = _ballPosition.asStateFlow()
 
     private val _isDebugMode = MutableStateFlow(false)
     val isDebugMode: StateFlow<Boolean> = _isDebugMode.asStateFlow()
@@ -108,35 +113,37 @@ class CameraViewModel @Inject constructor(
 
     /**
      * Multi-criteria check: are these keypoints from a real court?
+     * Relaxed thresholds to reduce false negatives on real courts
+     * (night lighting, clay courts, unusual angles).
      */
     private fun isRealDetection(keypoints: List<Keypoint>, imageWidth: Int, imageHeight: Int): Boolean {
-        if (keypoints.size < 6) return false
+        if (keypoints.size < 4) return false
 
-        // Criterion 1: Mean confidence must be reasonable
+        // Criterion 1: Mean confidence must be reasonable (relaxed 0.5→0.3)
         val meanConf = keypoints.map { it.confidence }.average().toFloat()
-        if (meanConf < 0.5f) return false
+        if (meanConf < 0.3f) return false
 
-        // Criterion 2: Confidence shouldn't be too scattered (real courts are more uniform)
+        // Criterion 2: Confidence scatter (relaxed 0.25→0.35)
         val confValues = keypoints.map { it.confidence.toDouble() }
         val confMean = confValues.average()
         val confStd = sqrt(confValues.map { (it - confMean) * (it - confMean) }.average()).toFloat()
-        if (confStd > 0.25f) return false
+        if (confStd > 0.35f) return false
 
-        // Criterion 3: Baseline should span reasonable width
+        // Criterion 3: Baseline should span reasonable width (relaxed 0.15→0.10)
         val kp12 = keypoints.find { it.id == 12 }
         val kp16 = keypoints.find { it.id == 16 }
         if (kp12 != null && kp16 != null) {
             val baselineWidth = abs(kp16.x - kp12.x) / imageWidth
-            if (baselineWidth < 0.15f) return false
+            if (baselineWidth < 0.10f) return false
         }
 
         // Criterion 4: Distance from model's default output
         val defaultDist = distanceFromDefaults(keypoints, imageWidth, imageHeight)
         if (defaultDist < 0.02f) return false
 
-        // Criterion 5: At least 6 keypoints with high confidence
-        val reliableCount = keypoints.count { it.confidence > 0.7f }
-        if (reliableCount < 6) return false
+        // Criterion 5: At least 4 keypoints with decent confidence (relaxed 6@0.7→4@0.5)
+        val reliableCount = keypoints.count { it.confidence > 0.5f }
+        if (reliableCount < 4) return false
 
         return true
     }
@@ -214,6 +221,11 @@ class CameraViewModel @Inject constructor(
 
             // Step 1: Detect keypoints
             val keypoints = detector.detect(bitmap, imageWidth, imageHeight)
+
+            // Ball tracking: feed every frame (runs on same bitmap before recycle)
+            val ballResult = ballDetector.detect(bitmap, imageWidth, imageHeight)
+            _ballPosition.value = ballResult
+
             bitmap.recycle()
 
             val inferenceTimeMs = (System.nanoTime() - startTime) / 1_000_000
@@ -249,8 +261,8 @@ class CameraViewModel @Inject constructor(
 
             // Step 8: Determine detection status
             val status = when {
-                reprojError < 20f && validProjected.size >= 12 -> DetectionStatus.DETECTED
-                reprojError < 50f && validProjected.size >= 8 -> DetectionStatus.PARTIAL
+                reprojError < 30f && validProjected.size >= 10 -> DetectionStatus.DETECTED
+                reprojError < 80f && validProjected.size >= 6 -> DetectionStatus.PARTIAL
                 else -> DetectionStatus.NOT_DETECTED
             }
 
@@ -320,5 +332,6 @@ class CameraViewModel @Inject constructor(
         super.onCleared()
         cameraManager.shutdown()
         detector.close()
+        ballDetector.close()
     }
 }
