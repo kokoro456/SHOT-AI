@@ -3,6 +3,10 @@ package com.shot.app.viewmodel
 import android.app.Application
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.util.Log
 import androidx.camera.core.ImageProxy
 import androidx.camera.view.PreviewView
@@ -29,7 +33,7 @@ import kotlin.math.sqrt
 @HiltViewModel
 class CameraViewModel @Inject constructor(
     application: Application
-) : AndroidViewModel(application) {
+) : AndroidViewModel(application), SensorEventListener {
 
     private val cameraManager = CameraManager(application)
     private var isCameraBound = false
@@ -42,26 +46,41 @@ class CameraViewModel @Inject constructor(
     private val validator = HomographyValidator()
     private val smoother = TemporalSmoother()
 
-    // Output-level stabilization: suppress emitting new results when projected
-    // keypoints are nearly identical to the last emitted ones.
+    // Note: ball detection runs synchronously to preserve 3-frame temporal consistency
+
+    // Output-level stabilization
     private var lastEmittedProjected: List<Keypoint>? = null
     private var lastEmittedH: FloatArray? = null
-
-    /** Max average movement (pixels) of projected keypoints before we emit an update. */
     private val outputDeadzoneThreshold = 2.0f
 
     // Default keypoint positions (model outputs these for non-court scenes)
     private val defaultPositions = floatArrayOf(
-        0.29f, 0.53f,  // kp9
-        0.52f, 0.53f,  // kp10
-        0.66f, 0.55f,  // kp11
-        0.29f, 0.71f,  // kp12
-        0.36f, 0.70f,  // kp13
-        0.56f, 0.70f,  // kp14
-        0.77f, 0.71f,  // kp15
-        0.73f, 0.61f   // kp16
+        0.29f, 0.53f, 0.52f, 0.53f, 0.66f, 0.55f, 0.29f, 0.71f,
+        0.36f, 0.70f, 0.56f, 0.70f, 0.77f, 0.71f, 0.73f, 0.61f
     )
 
+    // --- Court Lock Mode ---
+    private var isCourtLocked = false
+    private var lockedDetectionResult: CourtDetectionResult? = null
+
+    // --- Ball marker persistence (grace period) ---
+    private var lastDetectedBall: BallTrackingDetector.BallPosition? = null
+    private var ballMissFrameCount = 0
+    private val ballGraceFrames = 4  // Keep showing ball for N frames after losing detection
+
+    // --- G-Sensor movement detection ---
+    private val sensorManager = application.getSystemService(SensorManager::class.java)
+    private val gyroscope = sensorManager?.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+    private var gyroRegistered = false
+
+    // Accumulated angular change since court lock
+    private var accumulatedRotation = 0f
+    private var lastGyroTimestamp = 0L
+
+    /** Angular change threshold (radians) to trigger movement alert. ~3 degrees */
+    private val movementThreshold = 0.05f
+
+    // --- StateFlows ---
     private val _detectionResult = MutableStateFlow(CourtDetectionResult.EMPTY)
     val detectionResult: StateFlow<CourtDetectionResult> = _detectionResult.asStateFlow()
 
@@ -74,6 +93,13 @@ class CameraViewModel @Inject constructor(
     private val _isRecording = MutableStateFlow(false)
     val isRecording: StateFlow<Boolean> = _isRecording.asStateFlow()
 
+    private val _isCourtLockedFlow = MutableStateFlow(false)
+    val isCourtLockedFlow: StateFlow<Boolean> = _isCourtLockedFlow.asStateFlow()
+
+    /** True when camera moved significantly after court lock */
+    private val _cameraMovedAlert = MutableStateFlow(false)
+    val cameraMovedAlert: StateFlow<Boolean> = _cameraMovedAlert.asStateFlow()
+
     fun bindCamera(previewView: PreviewView) {
         if (isCameraBound) return
         val lifecycleOwner = previewView.findViewTreeLifecycleOwner() ?: return
@@ -81,17 +107,81 @@ class CameraViewModel @Inject constructor(
         cameraManager.bind(
             previewView = previewView,
             lifecycleOwner = lifecycleOwner,
-            onFrame = { imageProxy ->
-                processFrame(imageProxy)
-            }
+            onFrame = { imageProxy -> processFrame(imageProxy) }
         )
     }
 
-    /**
-     * Fast pre-check: is the image usable for court detection?
-     * Rejects covered cameras, pitch-black, or uniform scenes.
-     * Samples a 32x32 grid and checks grayscale variance.
-     */
+    // --- Court Lock Controls ---
+
+    /** Lock court detection at current state. Starts gyroscope monitoring. */
+    fun lockCourt() {
+        val current = _detectionResult.value
+        if (current.status == DetectionStatus.NOT_DETECTED) return
+
+        isCourtLocked = true
+        lockedDetectionResult = current
+        _isCourtLockedFlow.value = true
+        _cameraMovedAlert.value = false
+
+        // Start gyroscope monitoring
+        accumulatedRotation = 0f
+        lastGyroTimestamp = 0L
+        if (!gyroRegistered && gyroscope != null) {
+            sensorManager?.registerListener(this, gyroscope, SensorManager.SENSOR_DELAY_UI)
+            gyroRegistered = true
+        }
+    }
+
+    /** Unlock court detection. Stops gyroscope monitoring. */
+    fun unlockCourt() {
+        isCourtLocked = false
+        lockedDetectionResult = null
+        _isCourtLockedFlow.value = false
+        _cameraMovedAlert.value = false
+        smoother.reset()
+        lastEmittedProjected = null
+        lastEmittedH = null
+
+        // Stop gyroscope
+        if (gyroRegistered) {
+            sensorManager?.unregisterListener(this)
+            gyroRegistered = false
+        }
+    }
+
+    /** Dismiss movement alert and re-lock at current position */
+    fun dismissMovementAlert() {
+        _cameraMovedAlert.value = false
+        unlockCourt()
+    }
+
+    // --- G-Sensor callbacks ---
+
+    override fun onSensorChanged(event: SensorEvent?) {
+        if (event?.sensor?.type != Sensor.TYPE_GYROSCOPE) return
+        if (!isCourtLocked) return
+
+        val timestamp = event.timestamp
+        if (lastGyroTimestamp != 0L) {
+            val dt = (timestamp - lastGyroTimestamp) * 1e-9f // nanoseconds → seconds
+            // Angular velocity magnitude (rad/s)
+            val wx = event.values[0]
+            val wy = event.values[1]
+            val wz = event.values[2]
+            val magnitude = sqrt(wx * wx + wy * wy + wz * wz)
+            accumulatedRotation += magnitude * dt
+
+            if (accumulatedRotation > movementThreshold) {
+                _cameraMovedAlert.value = true
+            }
+        }
+        lastGyroTimestamp = timestamp
+    }
+
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+
+    // --- Image usability check ---
+
     private fun isImageUsable(bitmap: Bitmap): Boolean {
         val small = Bitmap.createScaledBitmap(bitmap, 32, 32, false)
         var sum = 0.0
@@ -108,43 +198,29 @@ class CameraViewModel @Inject constructor(
         small.recycle()
         val mean = sum / total
         val variance = (sumSq / total) - (mean * mean)
-        return variance > 100.0 // uniform/dark images have very low variance
+        return variance > 100.0
     }
 
-    /**
-     * Multi-criteria check: are these keypoints from a real court?
-     * Relaxed thresholds to reduce false negatives on real courts
-     * (night lighting, clay courts, unusual angles).
-     */
+    // --- Real detection check ---
+
     private fun isRealDetection(keypoints: List<Keypoint>, imageWidth: Int, imageHeight: Int): Boolean {
         if (keypoints.size < 4) return false
-
-        // Criterion 1: Mean confidence must be reasonable (relaxed 0.5→0.3)
         val meanConf = keypoints.map { it.confidence }.average().toFloat()
         if (meanConf < 0.3f) return false
-
-        // Criterion 2: Confidence scatter (relaxed 0.25→0.35)
         val confValues = keypoints.map { it.confidence.toDouble() }
         val confMean = confValues.average()
         val confStd = sqrt(confValues.map { (it - confMean) * (it - confMean) }.average()).toFloat()
         if (confStd > 0.35f) return false
-
-        // Criterion 3: Baseline should span reasonable width (relaxed 0.15→0.10)
         val kp12 = keypoints.find { it.id == 12 }
         val kp16 = keypoints.find { it.id == 16 }
         if (kp12 != null && kp16 != null) {
             val baselineWidth = abs(kp16.x - kp12.x) / imageWidth
             if (baselineWidth < 0.10f) return false
         }
-
-        // Criterion 4: Distance from model's default output
         val defaultDist = distanceFromDefaults(keypoints, imageWidth, imageHeight)
         if (defaultDist < 0.02f) return false
-
-        // Criterion 5: At least 4 keypoints with decent confidence (relaxed 6@0.7→4@0.5)
         val reliableCount = keypoints.count { it.confidence > 0.5f }
         if (reliableCount < 4) return false
-
         return true
     }
 
@@ -180,14 +256,7 @@ class CameraViewModel @Inject constructor(
         lastEmittedH = null
     }
 
-    /**
-     * Check whether the new projected keypoints are close enough to the previously
-     * emitted ones that we can suppress the update and avoid micro-jitter.
-     */
-    private fun isOutputStable(
-        prev: List<Keypoint>,
-        current: List<Keypoint>
-    ): Boolean {
+    private fun isOutputStable(prev: List<Keypoint>, current: List<Keypoint>): Boolean {
         if (prev.size != current.size) return false
         val prevById = prev.associateBy { it.id }
         var totalDist = 0f
@@ -200,32 +269,75 @@ class CameraViewModel @Inject constructor(
             count++
         }
         if (count == 0) return false
-        val avgDist = totalDist / count
-        return avgDist < outputDeadzoneThreshold
+        return totalDist / count < outputDeadzoneThreshold
     }
+
+    // --- Ball persistence logic ---
+
+    private fun updateBallWithPersistence(newBall: BallTrackingDetector.BallPosition?) {
+        if (newBall != null && newBall.detected) {
+            // Ball detected this frame
+            lastDetectedBall = newBall
+            ballMissFrameCount = 0
+            _ballPosition.value = newBall
+        } else {
+            // Ball not detected this frame
+            ballMissFrameCount++
+            if (ballMissFrameCount <= ballGraceFrames && lastDetectedBall != null) {
+                // Grace period: keep showing last known position with fading confidence
+                val fadeFactor = 1f - (ballMissFrameCount.toFloat() / (ballGraceFrames + 1))
+                _ballPosition.value = lastDetectedBall!!.copy(
+                    confidence = lastDetectedBall!!.confidence * fadeFactor
+                )
+            } else {
+                // Grace period expired
+                _ballPosition.value = newBall  // null or not-detected
+                lastDetectedBall = null
+            }
+        }
+    }
+
+    // --- Main frame processing ---
 
     private fun processFrame(imageProxy: ImageProxy) {
         try {
             val startTime = System.nanoTime()
 
-            val bitmap = imageProxyToBitmap(imageProxy)
             val imageWidth = imageProxy.width
             val imageHeight = imageProxy.height
 
-            // Pre-check: reject uniform/dark images before inference
+            // --- LOCKED MODE: ball-only fast path (skip bitmap overhead) ---
+            if (isCourtLocked) {
+                val bitmap = imageProxyToBitmap(imageProxy)
+                val ballResult = ballDetector.detect(bitmap, imageWidth, imageHeight)
+                updateBallWithPersistence(ballResult)
+                bitmap.recycle()
+
+                val locked = lockedDetectionResult
+                if (locked != null) {
+                    _detectionResult.value = locked.copy(
+                        inferenceTimeMs = (System.nanoTime() - startTime) / 1_000_000
+                    )
+                }
+                return
+            }
+
+            // --- UNLOCKED MODE: full pipeline ---
+            val bitmap = imageProxyToBitmap(imageProxy)
+
+            // Pre-check: reject uniform/dark images
             if (!isImageUsable(bitmap)) {
                 bitmap.recycle()
                 emitNotDetected(emptyList(), (System.nanoTime() - startTime) / 1_000_000)
                 return
             }
 
+            // Ball detection (synchronous, preserves 3-frame temporal order)
+            val ballResult = ballDetector.detect(bitmap, imageWidth, imageHeight)
+            updateBallWithPersistence(ballResult)
+
             // Step 1: Detect keypoints
             val keypoints = detector.detect(bitmap, imageWidth, imageHeight)
-
-            // Ball tracking: feed every frame (runs on same bitmap before recycle)
-            val ballResult = ballDetector.detect(bitmap, imageWidth, imageHeight)
-            _ballPosition.value = ballResult
-
             bitmap.recycle()
 
             val inferenceTimeMs = (System.nanoTime() - startTime) / 1_000_000
@@ -236,39 +348,37 @@ class CameraViewModel @Inject constructor(
                 return
             }
 
-            // Step 3: Smooth keypoints to reduce jitter
+            // Step 3: Smooth keypoints
             val smoothedKeypoints = smoother.smoothKeypoints(keypoints)
 
-            // Step 4: Compute homography from smoothed keypoints
+            // Step 4: Compute homography
             val rawH = homographyCalculator.computeHomography(smoothedKeypoints)
             if (rawH == null) {
                 emitNotDetected(keypoints, inferenceTimeMs)
                 return
             }
 
-            // Step 5: Smooth homography for additional stability
+            // Step 5: Smooth homography
             val smoothedH = smoother.smooth(rawH, smoothedKeypoints)
 
             // Step 6: Project all 16 keypoints
             val allProjected = projector.projectAllKeypoints(smoothedH)
 
-            // Step 7: Validate projected points geometry
+            // Step 7: Validate projected points
             val validProjected = validator.filterValidProjections(
                 allProjected, keypoints, imageWidth, imageHeight
             )
 
             val reprojError = projector.computeReprojectionError(smoothedKeypoints, smoothedH)
 
-            // Step 8: Determine detection status
+            // Step 8: Determine status
             val status = when {
                 reprojError < 30f && validProjected.size >= 10 -> DetectionStatus.DETECTED
                 reprojError < 80f && validProjected.size >= 6 -> DetectionStatus.PARTIAL
                 else -> DetectionStatus.NOT_DETECTED
             }
 
-            // Step 9: Output-level stabilization – if the projected overlay barely
-            // moved compared to the last emitted frame, reuse the previous projected
-            // points and homography to keep the overlay perfectly still.
+            // Step 9: Output stabilization
             val prevProjected = lastEmittedProjected
             val prevH = lastEmittedH
             val useStabilized = prevProjected != null && prevH != null
@@ -330,6 +440,9 @@ class CameraViewModel @Inject constructor(
 
     override fun onCleared() {
         super.onCleared()
+        if (gyroRegistered) {
+            sensorManager?.unregisterListener(this)
+        }
         cameraManager.shutdown()
         detector.close()
         ballDetector.close()

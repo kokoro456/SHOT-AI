@@ -33,11 +33,11 @@ class HomographyValidator(
      * Filter projected keypoints by geometric validity.
      *
      * Near-court points (KP9-16) are always kept (they come from direct detection).
-     * Far-court points (KP1-8) are validated against strict geometric constraints:
-     * - Must be within tight image bounds (20% margin, not 50%)
-     * - Must be above (lower y) the near-court min Y
+     * Far-court points (KP1-8) are validated against relaxed geometric constraints:
+     * - Must be within image bounds (30% margin)
+     * - Must be above (lower y) the near-court service line (min Y) with tolerance
      * - Far baseline must be narrower than near baseline (perspective foreshortening)
-     * - Far-court cannot extend too far above near-court (max 60% of court height)
+     * - Far-court cannot extend too far above near-court
      *
      * Invalid far-court points are removed to prevent wild overlay rendering.
      */
@@ -58,7 +58,7 @@ class HomographyValidator(
 
         if (farCourt.isEmpty() || nearCourt.isEmpty()) return result
 
-        // Reference: use MIN y of near-court (topmost point) instead of mean
+        // Reference: use service line Y (KP9-11) for "top of near court"
         val nearYs = detected.filter { it.id in 9..16 }.map { it.y }
         val nearMinY = nearYs.minOrNull() ?: return result
         val nearMaxY = nearYs.maxOrNull() ?: return result
@@ -89,14 +89,18 @@ class HomographyValidator(
             null
         }
 
-        // Tighter ratio range: 0.08~0.80 (was 0.05~0.95)
-        val farCourtGeometryValid = farNearRatio == null || farNearRatio in 0.08f..0.80f
+        // Relaxed ratio: 0.05~0.90
+        val farCourtGeometryValid = farNearRatio == null || farNearRatio in 0.05f..0.90f
 
-        // Max allowed vertical extent above near-court top
-        val maxFarExtent = if (nearCourtHeight > 0) nearCourtHeight * 1.5f else imageHeight * 0.4f
+        // Max allowed vertical extent above near-court top (relaxed: 2.5x)
+        val maxFarExtent = if (nearCourtHeight > 0) nearCourtHeight * 2.5f else imageHeight * 0.6f
 
-        // Tighter margin: 20% of image width (was 50%)
-        val margin = imageWidth * 0.2f
+        // Relaxed margin: 30% of image width
+        val margin = imageWidth * 0.3f
+
+        // Allow far-court points slightly below near-court service line
+        // (perspective can push far-court points close to or slightly past service line)
+        val yTolerance = if (nearCourtHeight > 0) nearCourtHeight * 0.15f else 20f
 
         // Validate each far-court point
         var validFarCount = 0
@@ -105,14 +109,14 @@ class HomographyValidator(
         for (kp in farCourt) {
             var valid = true
 
-            // Bound check: tighter bounds
+            // Bound check: relaxed bounds
             if (kp.x < -margin || kp.x > imageWidth + margin ||
                 kp.y < -margin || kp.y > imageHeight + margin) {
                 valid = false
             }
 
-            // Far-court points must be above near-court top (use minY, not meanY)
-            if (kp.y > nearMinY) {
+            // Far-court points must be above near-court top (with tolerance)
+            if (kp.y > nearMinY + yTolerance) {
                 valid = false
             }
 
@@ -132,9 +136,8 @@ class HomographyValidator(
             }
         }
 
-        // Only add far-court points if majority passed validation (at least 5 of 8)
-        // This prevents partial/broken far-court overlays
-        if (validFarCount >= 5) {
+        // Relaxed: at least 4 of 8 far-court points must pass (was 5)
+        if (validFarCount >= 4) {
             result.addAll(farCandidates)
         }
 

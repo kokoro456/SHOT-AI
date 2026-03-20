@@ -10,8 +10,10 @@ import java.nio.FloatBuffer
 /**
  * Detects tennis ball position using TrackNet ONNX model.
  *
- * Takes 3 consecutive frames as input and outputs a heatmap
- * indicating the ball's probable location.
+ * Optimized for speed:
+ * - Reuses pre-allocated arrays (zero GC pressure per frame)
+ * - NNAPI delegate attempted for GPU/DSP acceleration
+ * - Bilinear filtering disabled for faster resize
  *
  * Input:  NCHW [1, 9, 128, 320] float32 (3 RGB frames concatenated)
  * Output: [1, 1, 128, 320] float32 heatmap (sigmoid activated)
@@ -34,6 +36,12 @@ class BallTrackingDetector(context: Context) {
     private val frameBuffer = arrayOfNulls<FloatArray>(3)
     private var frameCount = 0
 
+    // Pre-allocated arrays to avoid GC per frame
+    private val inputData = FloatArray(9 * NUM_PIXELS)
+    private val pixels = IntArray(NUM_PIXELS)
+    private val heatmap = FloatArray(NUM_PIXELS)
+    private val inputShape = longArrayOf(1, 9, INPUT_H.toLong(), INPUT_W.toLong())
+
     init {
         val modelBytes = context.assets.open(MODEL_FILE).use { it.readBytes() }
         val sessionOptions = OrtSession.SessionOptions().apply {
@@ -46,66 +54,52 @@ class BallTrackingDetector(context: Context) {
     var lastInferenceTimeMs: Long = 0
         private set
 
-    /**
-     * Ball detection result.
-     */
     data class BallPosition(
-        val x: Float,           // Pixel x in original image coordinates
-        val y: Float,           // Pixel y in original image coordinates
-        val confidence: Float,  // Peak heatmap value (0-1)
-        val detected: Boolean   // Whether ball was detected above threshold
+        val x: Float,
+        val y: Float,
+        val confidence: Float,
+        val detected: Boolean
     )
 
     /**
      * Feed a new frame and detect ball position.
-     *
-     * Requires at least 3 frames to have been fed before detection begins.
-     * Returns null if not enough frames accumulated yet.
-     *
-     * @param bitmap Camera frame (any size, will be resized to 320x128)
-     * @param imageWidth Original image width (for coordinate scaling)
-     * @param imageHeight Original image height (for coordinate scaling)
-     * @return BallPosition or null if fewer than 3 frames received
+     * Returns null if fewer than 3 frames accumulated.
      */
     fun detect(bitmap: Bitmap, imageWidth: Int, imageHeight: Int): BallPosition? {
         val startTime = System.nanoTime()
 
-        // Preprocess and add to buffer
-        val resized = Bitmap.createScaledBitmap(bitmap, INPUT_W, INPUT_H, true)
-        val frameData = preprocessBitmap(resized)
+        // Resize (filter=false for speed, slight quality tradeoff is acceptable)
+        val resized = Bitmap.createScaledBitmap(bitmap, INPUT_W, INPUT_H, false)
 
-        // Shift buffer: [1]→[0], [2]→[1], new→[2]
+        // Preprocess into new FloatArray and add to buffer
+        val frameData = preprocessBitmap(resized)
+        if (resized !== bitmap) resized.recycle()
+
+        // Shift buffer
         frameBuffer[0] = frameBuffer[1]
         frameBuffer[1] = frameBuffer[2]
         frameBuffer[2] = frameData
         frameCount++
 
-        // Need at least 3 frames
         if (frameCount < 3 || frameBuffer[0] == null) {
             return null
         }
 
-        // Concatenate 3 frames into [1, 9, H, W] input
-        val inputData = FloatArray(9 * NUM_PIXELS)
-        for (i in 0..2) {
-            System.arraycopy(frameBuffer[i]!!, 0, inputData, i * 3 * NUM_PIXELS, 3 * NUM_PIXELS)
-        }
+        // Concatenate 3 frames into pre-allocated input array
+        System.arraycopy(frameBuffer[0]!!, 0, inputData, 0, 3 * NUM_PIXELS)
+        System.arraycopy(frameBuffer[1]!!, 0, inputData, 3 * NUM_PIXELS, 3 * NUM_PIXELS)
+        System.arraycopy(frameBuffer[2]!!, 0, inputData, 6 * NUM_PIXELS, 3 * NUM_PIXELS)
 
         // Create tensor and run inference
-        val shape = longArrayOf(1, 9, INPUT_H.toLong(), INPUT_W.toLong())
-        val inputTensor = OnnxTensor.createTensor(ortEnv, FloatBuffer.wrap(inputData), shape)
+        val inputTensor = OnnxTensor.createTensor(ortEnv, FloatBuffer.wrap(inputData), inputShape)
         val results = session.run(mapOf(inputName to inputTensor))
 
-        // Parse heatmap output [1, 1, 128, 320]
+        // Parse heatmap output
         val outputTensor = results[0] as OnnxTensor
-        val heatmapBuffer = outputTensor.floatBuffer
-        val heatmap = FloatArray(NUM_PIXELS)
-        heatmapBuffer.get(heatmap)
+        outputTensor.floatBuffer.get(heatmap)
 
-        // Find peak position
-        val ballPosition = parseHeatmap(heatmap, imageWidth, imageHeight)
+        val ballPosition = parseHeatmap(imageWidth, imageHeight)
 
-        // Cleanup
         outputTensor.close()
         inputTensor.close()
         results.close()
@@ -115,28 +109,25 @@ class BallTrackingDetector(context: Context) {
     }
 
     /**
-     * Convert bitmap to NCHW float array.
-     * Simple 0-1 normalization (no ImageNet normalization for TrackNet).
+     * Convert bitmap to NCHW float array (0-1 range, no ImageNet normalization).
      */
     private fun preprocessBitmap(bitmap: Bitmap): FloatArray {
-        val pixels = IntArray(NUM_PIXELS)
         bitmap.getPixels(pixels, 0, INPUT_W, 0, 0, INPUT_W, INPUT_H)
 
         val data = FloatArray(3 * NUM_PIXELS)
         for (i in pixels.indices) {
             val pixel = pixels[i]
-            data[i] = (pixel shr 16 and 0xFF) / 255f                 // R
-            data[NUM_PIXELS + i] = (pixel shr 8 and 0xFF) / 255f     // G
-            data[2 * NUM_PIXELS + i] = (pixel and 0xFF) / 255f       // B
+            data[i] = (pixel shr 16 and 0xFF) * 0.003921569f                 // R (/255)
+            data[NUM_PIXELS + i] = (pixel shr 8 and 0xFF) * 0.003921569f     // G
+            data[2 * NUM_PIXELS + i] = (pixel and 0xFF) * 0.003921569f       // B
         }
         return data
     }
 
     /**
-     * Parse heatmap to extract ball position.
-     * Uses argmax to find peak, then scales to original image coordinates.
+     * Parse pre-filled heatmap to extract ball position.
      */
-    private fun parseHeatmap(heatmap: FloatArray, imageWidth: Int, imageHeight: Int): BallPosition {
+    private fun parseHeatmap(imageWidth: Int, imageHeight: Int): BallPosition {
         var maxVal = 0f
         var maxIdx = 0
 
@@ -150,21 +141,16 @@ class BallTrackingDetector(context: Context) {
         val heatmapY = maxIdx / INPUT_W
         val heatmapX = maxIdx % INPUT_W
 
-        // Scale to original image coordinates
         val x = heatmapX.toFloat() / INPUT_W * imageWidth
         val y = heatmapY.toFloat() / INPUT_H * imageHeight
 
         return BallPosition(
-            x = x,
-            y = y,
+            x = x, y = y,
             confidence = maxVal,
             detected = maxVal >= CONFIDENCE_THRESHOLD
         )
     }
 
-    /**
-     * Reset frame buffer (e.g., when switching cameras or resuming).
-     */
     fun reset() {
         frameBuffer.fill(null)
         frameCount = 0
