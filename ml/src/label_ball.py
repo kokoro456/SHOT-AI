@@ -200,8 +200,14 @@ function loadFrame() {
     img.onload = () => {
         canvas.width = img.naturalWidth;
         canvas.height = img.naturalHeight;
-        scale = 1;
-        canvas.style.transform = '';
+        // Auto-fit: scale canvas to fill container
+        const container = document.getElementById('canvasContainer');
+        const cw = container.clientWidth;
+        const ch = container.clientHeight;
+        const fitScale = Math.min(cw / img.naturalWidth, ch / img.naturalHeight) * 0.95;
+        scale = Math.max(fitScale, 1.5); // at least 1.5x zoom
+        canvas.style.transform = `scale(${scale})`;
+        canvas.style.transformOrigin = 'center center';
         redraw();
     };
     img.src = '/frames/' + filename;
@@ -275,6 +281,8 @@ function onCanvasClick(e) {
     ballPos = { x: x, y: y, visibility: 1 };
     redraw();
     updateUI();
+    // Auto-save and advance to next frame
+    saveAndNext();
 }
 
 function markNotVisible() {
