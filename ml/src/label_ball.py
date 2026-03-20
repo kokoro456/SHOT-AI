@@ -280,7 +280,8 @@ function onCanvasClick(e) {
 function markNotVisible() {
     ballPos = { x: -1, y: -1, visibility: 0 };
     updateUI();
-    setStatus('Marked: not visible', 'warn');
+    setStatus('Not Visible - saving...', 'warn');
+    saveAndNext();
 }
 
 function markOccluded() {

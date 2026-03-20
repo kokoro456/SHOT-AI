@@ -1,424 +1,216 @@
-# SHOT Phase 1 인수인계 문서
+# SHOT 인수인계 문서
 
-> 최종 업데이트: 2026-03-20
+> 최종 업데이트: 2026-03-21
 
 ## 프로젝트 개요
 
-SHOT은 핸드폰 카메라로 테니스 코트 라인을 실시간 인식하는 Android 앱이다.
-**키포인트 검출 + 호모그래피 역산** 방식으로 동작한다:
+SHOT은 핸드폰 카메라로 테니스 코트 라인을 실시간 인식하고, 볼을 추적하여 IN/OUT 판정을 자동화하는 Android 앱이다.
 
-1. TFLite 모델이 카메라 프레임에서 니어코트 8개 키포인트(9~16번) 검출
-2. ITF 표준 치수 + 호모그래피로 전체 16개 코트 포인트 역산
-3. 코트 라인 오버레이 렌더링
-
----
-
-## 현재 상태 요약 (2026-03-19)
-
-### 완료된 것
-- ✅ ML 모델 학습 완료 (히트맵 3-stage v2, **0.68px 오차**, 이전 2.41px 대비 3.5배 개선)
-- ✅ SNTC 데이터 대규모 수집: 678 동영상에서 753 프레임 추출, 622장 라벨링
-- ✅ 총 라벨링 데이터: 961장 (YouTube 339 + SNTC 462 + SNTC selected 160)
-- ✅ Android 프로젝트 스캐폴딩 (멀티모듈)
-- ✅ Android 빌드 성공 (Gradle 8.9, AGP 8.7.3)
-- ✅ 실기기(USB) 설치 + 실행 성공
-- ✅ 카메라 라이브 프리뷰 동작
-- ✅ ML 추론 파이프라인 연결 (카메라 → 검출 → 호모그래피 → 투영)
-- ✅ 코트 라인 오버레이 렌더링 (Compose Canvas)
-- ✅ 키포인트 시각화 (초록 원)
-- ✅ 상태 표시 (코트 인식됨/부분 인식/미인식)
-- ✅ 디버그 정보 표시 (추론시간, 재투영오차, 키포인트수)
-- ✅ TFLite 변환 실패 → ONNX Runtime으로 전환 (Android 배포)
-- ✅ 새 모델(v2) 폰 배포 완료, 모니터 스크린샷(12.jpg, 123.jpg) 테스트에서 유의미한 개선 확인
-- ✅ 오버레이 지터 수정: deadzone 4px, 3-frame gate, homography deadzone, output stabilization
-- ✅ 라벨링 도구 개선: 같은 영상 그룹 라벨 복사 기능
-
-### 현재 문제점
-- ❌ **TFLite 변환 불가**: onnx2tf가 decoder의 skip connection을 처리 못함 → ONNX Runtime 사용 중
-- ❌ Android Studio Run 버튼 비활성화 (Gradle sync 문제, ADB 직접 설치로 우회)
-- ⚠️ **코트 인식 품질 문제** (아래 "실제 코트 필드 테스트" 참조) — 나중에 재작업 필요
-
-### 모니터 테스트 스크린샷 분석
-
-| 파일 | 상황 | 결과 |
-|------|------|------|
-| EE.jpg | 방송 영상(아카풀코) 비춤 | 가장 정확. 니어/파코트 오버레이 거의 일치 |
-| RE.jpg | 방송 영상(아카풀코) 비춤 | 니어코트 OK, 파코트 약간 어긋남 |
-| SHOT.jpg | 방송 영상(마이애미) 비춤 | **심각한 오류** - 파코트 투영이 좌측으로 크게 밀림 |
-| AA.jpg | 실내 코트(Clean Tennis) | 니어코트 대략 맞으나 파코트 투영 크게 어긋남 |
-
-### 실제 코트 필드 테스트 (2026-03-20, UNYEON PRIME 야간 클레이코트)
-
-**테스트 환경**: 야외 클레이코트, 야간 조명, 핸드폰(갤럭시) 직접 촬영
-
-| # | 상태 표시 | 분석 |
-|---|----------|------|
-| 1 | 코트 인식됨 (초록) | **가장 좋은 결과**. 니어코트 키포인트가 실제 라인과 꽤 정확하게 일치 |
-| 2 | 코트를 인식할 수 없습니다 (빨강) | 거의 같은 앵글인데 미인식 (**False Negative**) |
-| 3 | 부분적으로 인식됨 (노랑) | 니어코트 라인이 실제와 상당히 잘 맞음. 서비스/사이드라인 양호 |
-| 4 | 부분적으로 인식됨 (노랑) | 비스듬한 앵글. 오버레이가 실제 라인과 크게 불일치 |
-| 5 | 코트를 인식할 수 없습니다 (빨강) | 코트가 잘 보이는데도 미인식 (**False Negative**) |
-
-**핵심 발견:**
-1. **니어코트 검출은 작동함** — 1, 3번에서 실제 라인과 잘 맞음 (모델 자체는 유효)
-2. **False Negative가 주요 문제** — 코트가 보이는데도 거부 (검증 기준 과도하게 엄격)
-3. **프레임 간 불안정** — 같은 위치에서 인식됨/미인식 왔다갔다
-4. **비스듬한 앵글에서 왜곡** — 학습 데이터에 부족한 구도
-5. **야간 + 클레이코트 환경** — 학습 데이터에 이 환경이 부족할 수 있음
-
-**적용한 조치 (2026-03-20):**
-- `isRealDetection` 기준 완화: meanConf 0.5→0.3, confStd 0.25→0.35, reliableCount 6@0.7→4@0.5
-- 상태 판정 완화: DETECTED reproj<20→30, PARTIAL reproj<50→80
-- 파코트 필터링 강화: 마진 50%→20%, nearMinY 사용, 수직 범위 제한, 5/8 통과 필수
-
-**향후 리마인드 — 코트 인식 품질 개선 과제 (함께 진행):**
-- [ ] 야간/클레이/실외 다양한 환경의 학습 데이터 추가 수집 (현재 대부분 SNTC 실내)
-- [ ] 비스듬한 앵글 학습 데이터 보강
-- [ ] 프레임 간 안정성: 히스테리시스 기반 상태 전환 (N프레임 연속 미인식이어야 NOT_DETECTED로 변경)
-- [ ] 키포인트 개수 부족 시 부분 호모그래피 또는 affine transform 사용 검토
-- [ ] OpenCV JNI 도입으로 findHomography + RANSAC 적용 검토
-- [ ] 입력 해상도 256→384 상향으로 원거리 라인 검출력 향상 시도
-- [ ] Android Studio Gradle sync 해결 (Run 버튼 활성화)
-- [ ] 데이터 다양성 확보 (야간/클레이/실외 코트)
+**핵심 기술:**
+1. **코트 인식**: MobileNetV3-Small 히트맵 모델 → 니어코트 8개 키포인트 검출 → 호모그래피 역산
+2. **볼 추적**: 경량 단일프레임 검출기 + 칼만 필터 (Phase 2b, 개발 중)
+3. **IN/OUT 판정**: 볼 궤적 + 코트 좌표계 교차점 (미구현)
 
 ---
 
-## 완료된 작업
+## 현재 상태 요약 (2026-03-21)
 
-### 1. Android 프로젝트 스캐폴딩 (Phase 1A)
+### Phase 2b: 경량 볼 검출기 + 칼만 필터 (진행 중)
 
-멀티모듈 구조 구성 완료:
+기존 TrackNet (3-frame, 148ms, 6fps)을 대체하여 **단일프레임 경량 검출기 (15-25ms) + 칼만 필터로 30-50fps** 목표.
 
-```
-SHOT/
-├── app/                    # 메인 앱 (Hilt, Compose, ViewModel)
-├── camera/                 # CameraX 관리
-├── court-detection/        # TFLite 모델 추론
-│   └── src/main/assets/
-│       └── court_keypoint.tflite  ← 학습된 모델 (4.25MB)
-├── court-model/            # 호모그래피 계산, 검증, 평활화
-├── core/                   # 데이터 모델, ITF 코트 스펙
-├── ml/                     # Python ML 학습 파이프라인
-└── docs/
-    └── superpowers/specs/  # 설계 스펙 문서
-```
+#### 완료된 것
+- ✅ **모델 설계** (`ml/src/model_ball.py`) - MobileNetV3-Small + ConvTranspose2d decoder
+  - Input: [1, 3, 192, 192] → Output: [1, 1, 48, 48] heatmap
+  - 파라미터: 2,271,201 (backbone 927K + decoder 1,344K)
+  - Focal loss (alpha=0.97, gamma=2.0), ImageNet normalization
+- ✅ **Kaggle 학습 노트북 v2** (`ml/notebooks/BallDetector_Training.ipynb`)
+  - Dropout 0.15, AdamW (weight_decay=1e-4), 강화된 augmentation
+  - **val_pixel_error 기준 best model 저장** (v1은 val_loss 기준이라 epoch 0 저장됨)
+  - TrackNet Dataset-001 (19,835 frames) 사용
+- ✅ **v1 학습 완료 (결과)**:
+  ```
+  Ep 0:  VlErr=9.3px (frozen)     ← val_loss 기준 best (epoch 0) 저장됨
+  Ep 5:  VlErr=9.1px (UNFROZEN)
+  Ep 13: VlErr=7.8px              ← 실제 best pixel error (저장 안됨!)
+  Ep 15: Early stopping
+  ```
+  - 문제: val_loss 기준 저장이라 epoch 0 모델만 저장됨, Kaggle 세션 만료로 소실
+  - → **v2 노트북에서 재학습 필요** (val_pixel_error 기준 저장으로 수정 완료)
+- ✅ **칼만 필터** (`court-detection/.../BallKalmanFilter.kt`)
+  - 6-state [x, y, vx, vy, ax, ay], diagonal covariance
+  - gating 150px, max 3 predict frames
+- ✅ **Android 통합 코드** (아직 모델 없이 코드만 준비)
+  - `BallTrackingDetector.kt` - 단일프레임 192×192 입력으로 변경
+  - `CameraViewModel.kt` - 칼만 필터 기반 볼 추적으로 변경
+- ✅ **ONNX export 스크립트** (`ml/src/export_ball_onnx.py`)
+- ✅ **핸드폰 촬영 영상 다운로드** (18개 영상, 87,601 프레임 추출)
+- ✅ **라벨링 도구** (`ml/src/label_ball.py`) - 브라우저 기반, N키로 Not Visible 자동저장
+- ✅ **라벨링용 프레임 서브샘플링** (3,600 프레임, 영상당 200장)
 
-**주요 Kotlin 파일:**
-
-| 파일 | 역할 | 상태 |
-|------|------|------|
-| `core/.../Keypoint.kt` | 키포인트 데이터 클래스 | 완료 |
-| `core/.../CourtDetectionResult.kt` | 검출 결과 모델 | 완료 |
-| `core/.../ItfCourtSpec.kt` | ITF 규격 16개 좌표 (미터) | 완료 |
-| `camera/.../CameraManager.kt` | CameraX Preview + ImageAnalysis | 완료 |
-| `court-detection/.../CourtKeypointDetector.kt` | TFLite 추론 (NHWC) | 완료 |
-| `court-model/.../HomographyCalculator.kt` | DLT + Jacobi SVD 호모그래피 | 완료 |
-| `court-model/.../CourtProjector.kt` | H⁻¹로 16개 포인트 투영 | 완료 |
-| `court-model/.../HomographyValidator.kt` | 재투영 오차, 행렬식 검증 | 완료 |
-| `court-model/.../TemporalSmoother.kt` | EMA 시간적 평활화 | 완료 |
-| `app/.../CameraViewModel.kt` | 파이프라인 오케스트레이션 | 완료 |
-| `app/.../CameraScreen.kt` | 카메라 프리뷰 + 코트/볼 오버레이 Compose UI | 완료 |
-| `app/.../MainActivity.kt` | Hilt 엔트리포인트 | 완료 |
-| `court-detection/.../BallTrackingDetector.kt` | TrackNet ONNX 추론 (3-frame, heatmap) | 완료 |
-
-### 2. ML 학습 파이프라인 (Phase 1B)
-
-**Python 파일 (`ml/src/`):**
-
-| 파일 | 역할 |
-|------|------|
-| `model.py` | MobileNetV3-Small + 키포인트 회귀 헤드 (1.1M params) |
-| `model_heatmap.py` | **히트맵 기반 키포인트 검출 모델** (MobileNetV3 + decoder) |
-| `dataset.py` | CourtKeypointDataset (JSON 어노테이션 로더) |
-| `augmentations.py` | Albumentations 증강 (색상, 기하, 노이즈, 그림자) |
-| `augmentations_v2.py` | 강한 도메인 갭 축소 augmentation |
-| `train.py` | 학습 루프 (AdamW, CosineAnnealingLR, early stopping) |
-| `train_3stage.py` | 3단계 학습 파이프라인 |
-| `train_compare.py` | 3가지 비교 실험 학습 |
-| `export_tflite.py` | PyTorch → ONNX → onnx2tf → TFLite 변환 |
-| `convert_dataset.py` | yastrebksv 14-keypoint → SHOT 8-keypoint 변환 |
-| `youtube_collect.py` | YouTube 검색 + URL 수집 |
-| `extract_frames.py` | yt-dlp 다운로드 + 프레임 추출 |
-| `predict_and_preview.py` | 모델 예측 + 시각적 미리보기 |
-| `review_data.py` | 대화형 검수 도구 |
-| `labeling_tool.py` | 브라우저 기반 키포인트 라벨링 도구 |
-| `train_tracknet.py` | TrackNet 볼 추적 모델 학습 (video-level split, early stopping) |
-| `convert_tracknet_dataset.py` | TrackNet Dataset-001 → JSON 변환 |
-| `export_tracknet_onnx.py` | TrackNet PyTorch → ONNX 변환 + 검증 |
-| `augmentations_ball.py` | 3-frame triplet 증강 (밝기, 색상, 노이즈, flip) |
-| `label_ball.py` | 볼 위치 라벨링 도구 (비디오 그룹 탐색) |
-| `review_ball_data.py` | 볼 어노테이션 검수 도구 |
-
-### 3. 모델 학습 결과
-
-**히트맵 3-Stage v2 학습 최종 결과: 평균 오차 0.68px** (이전 v1: 2.41px, 3.5배 개선)
-
-| Stage | 내용 | 오차(px) |
-|-------|------|----------|
-| v1 Stage 2 | 339장 phone data, Mixed 50:50 | 2.41 |
-| **v2 Stage 2** | **961장 phone data (YouTube 339 + SNTC 622), Mixed 50:50** | **0.68** |
-
-**모델 배포 (ONNX Runtime):**
-- TFLite 변환 실패: onnx2tf가 decoder의 skip connection 처리 불가
-- ONNX Runtime for Android로 전환
-- 입력: `[1, 3, 256, 256]` NCHW float32, ImageNet 정규화
-- 출력: 8 keypoints × [x, y, confidence]
-- 배치 위치: `court-detection/src/main/assets/` (ONNX 모델)
-
-### 4. TrackNet 볼 추적 모델 (Phase 2)
-
-**공개 데이터셋**: TrackNet Dataset-001 (19,835 프레임, 10 games, 95 clips)
-
-**모델 아키텍처**: TrackNet v2 (UNet-like, ConvBlock encoder-decoder with skip connections)
-- 입력: `[1, 9, 128, 320]` (3 consecutive RGB frames, NCHW)
-- 출력: `[1, 1, 128, 320]` (Gaussian heatmap)
-- 파라미터: 1,930,145
-- base_filters: 32
-
-**학습 결과** (Kaggle P100, early stopping patience=15):
-- Best epoch: 22 / 37
-- Best val_loss: 0.002171
-- Val Acc: 86.5% (threshold 0.5 기준)
-- Val Err: 1.6px
-- Training: video-level split, Gaussian heatmap (sigma=2.5), BCE loss
-
-**ONNX 변환**: 7.36MB, opset 18, max diff 1.3e-7
-
-**Android 통합**:
-- `BallTrackingDetector.kt`: 3-frame ring buffer, NCHW 전처리 (0-1 정규화, ImageNet 미사용)
-- heatmap argmax → confidence threshold 0.3 → 스케일링된 좌표 출력
-- `CameraViewModel.kt`: 매 프레임 ball detection, `ballPosition` StateFlow
-- `CameraScreen.kt`: BallOverlay (오렌지 마커 + 십자선 + 디버그 신뢰도 링)
-
-### 4. Android 빌드 환경 구축 (2026-03-19)
-
-노트북으로 작업환경 이전 후 발생한 빌드 에러들과 해결:
-
-| 문제 | 원인 | 해결 |
-|------|------|------|
-| `dependencyResolution` 에러 | Gradle 8.9에서 `dependencyResolutionManagement` 필요 | `settings.gradle.kts` 수정 |
-| non-ASCII 경로 에러 | 프로젝트 경로에 한글 (`잡/바탕 화면`) | `gradle.properties`에 `android.overridePathCheck=true` 추가 |
-| `tensorflow-lite-support:2.16.1` 없음 | Google Maven에 해당 버전 없음 | `0.4.4`로 다운그레이드 |
-| `windowKeepScreenOn` 에러 | `themes.xml`에서 style 속성 오류 | `android:keepScreenOn`은 View 속성, theme에서 제거 |
-| `mipmap/ic_launcher` 없음 | 앱 아이콘 리소스 누락 | 기본 아이콘 리소스 생성 |
-| Run ▶ 비활성화 | Gradle sync 실패 / wrapper 누락 | Gradle wrapper 파일 생성 + ADB 직접 설치로 우회 |
+#### 미완료
+- ❌ **v2 모델 학습** - Kaggle에서 새 노트북으로 재학습 필요
+- ❌ **ONNX 모델 파일** - 학습 완료 후 `court-detection/src/main/assets/ball_detector.onnx`에 배치
+- ❌ **핸드폰 영상 볼 라벨링** - 3,600 프레임 라벨링 대기 중
+- ❌ **Android 빌드 + 실기기 테스트**
+- ❌ **INT8 양자화**
 
 ---
 
-## 알려진 이슈 및 해결 필요 사항
+## 즉시 해야 할 작업 (우선순위 순)
 
-### 1. 호모그래피 역산 정밀도 (최우선)
+### 1. Kaggle v2 모델 재학습 ⭐ 최우선
 
-**현상**: 니어코트 8개 키포인트는 정확하게 검출되지만, 호모그래피로 역산한 파코트 포인트가 크게 어긋남.
-특히 카메라 앵글이 달라지면 오차가 급격히 증가 (SHOT.jpg vs EE.jpg).
+1. Kaggle에서 **새 노트북** 생성
+2. GPU P100 활성화
+3. TrackNet 데이터셋 추가 (Add Data → `tracknet-tennis-ball-detection`)
+4. `ml/notebooks/BallDetector_Training.ipynb` 셀 내용을 복사하여 순서대로 실행
+5. **주의**: P100은 CUDA compute 6.0이므로 PyTorch 호환 확인
+   ```
+   !pip install torch==2.2.0+cu118 torchvision==0.17.0+cu118 --index-url https://download.pytorch.org/whl/cu118
+   !pip install "numpy<2"
+   ```
+6. 학습 완료 후 ONNX export 셀 실행 → `ball_detector.onnx` 다운로드
+7. 다운로드한 파일을 `court-detection/src/main/assets/ball_detector.onnx`에 복사
 
-**원인 분석**:
-- DLT + Jacobi SVD 구현체의 수치 안정성 문제 가능성
-- 8개 포인트가 니어코트에 집중되어 있어 파코트 방향 외삽(extrapolation) 시 오차 증폭
-- 호모그래피 H 계산에 사용하는 좌표 정규화가 충분하지 않을 수 있음
-
-**해결 방향**:
-1. OpenCV 네이티브 `findHomography()` 대신 순수 Kotlin DLT 사용 중 → OpenCV JNI 도입 검토
-2. 포인트 수가 부족한 경우(6~7개) 호모그래피 대신 affine transform 사용 검토
-3. 재투영 오차 기반 outlier 제거 (RANSAC) 추가
-4. 파코트 포인트의 범위 제한 (화면 밖으로 너무 멀리 나가지 않도록)
-
-### 2. False Positive 문제
-
-**현상**: 카메라를 손으로 가려도 "코트 인식됨" 또는 "부분 인식"으로 표시됨.
-
-**원인**: 모델이 입력 이미지와 관계없이 일관된 "기본 위치" 키포인트를 출력.
-이 기본 위치들이 자기 일관성이 높아서 호모그래피 검증을 통과함.
-
-**현재 우회책**: `CameraViewModel`에서 모델 기본출력(검은 이미지의 출력)과 비교하여
-현재 출력이 기본출력과 너무 유사하면 거부하는 로직 추가됨.
-하지만 threshold 튜닝이 부족하여 실제 코트도 거부하는 경우 발생.
-
-**해결 방향**:
-1. 프레임 간 키포인트 변화량 기반 판정 (카메라 움직임에 키포인트가 반응하는지)
-2. 모델 출력 confidence 패턴 분석 (실제 코트: 일부 키포인트 매우 높고 일부 낮음 vs 비코트: 균일)
-3. 추론 전 이미지 variance 체크 (매우 어두운/단색 이미지 사전 거부)
-
-### 3. 실제 코트 테스트 미수행
-
-지금까지 테스트는 모두 **모니터에 방송 영상을 띄우고 핸드폰으로 촬영**하는 방식.
-실제 코트 옆에서 핸드폰 카메라로 직접 비추는 테스트가 필요함.
-모델은 YouTube 핸드폰 영상으로 학습했으므로 실제 환경에서는 다를 수 있음.
-
-### 4. Android Studio Run 버튼 비활성화
-
-Gradle sync가 완료되지 않아 Run Configuration이 자동 생성되지 않음.
-현재 **ADB 명령어로 직접 설치+실행**하는 방식으로 우회 중.
+### 2. 핸드폰 영상 볼 라벨링
 
 ```bash
-# 빌드
-cd "TENNIS SHOT" && JAVA_HOME="/c/Program Files/Android/Android Studio/jbr" \
-  "/c/Program Files/Android/Android Studio/jbr/bin/java.exe" -Xmx2048m \
-  -cp "gradle/wrapper/gradle-wrapper.jar" org.gradle.wrapper.GradleWrapperMain :app:assembleDebug
+cd C:\Users\kokor\Desktop\SHOT\ml
+python src/label_ball.py --frames data/phone_ball/frames_sampled --port 8081
+```
+- 브라우저에서 http://localhost:8081 접속
+- 조작: 클릭(볼 위치), N(안보임→자동저장), Enter(저장+다음), A/D(이전/다음), G/H(영상그룹 이동)
+- 결과: `data/phone_ball/ball_annotations.json` 자동 저장
+- 라벨링 후 도메인 갭 줄이기 위한 fine-tuning에 사용
 
-# 설치 + 실행
+### 3. Android 빌드 + 실기기 테스트
+
+ONNX 모델 배치 후:
+```bash
+cd "C:\Users\kokor\Desktop\SHOT"
+JAVA_HOME="/c/Program Files/Android/Android Studio/jbr" \
+  "./gradlew" :app:assembleDebug
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 adb shell am start -n com.shot.app/.MainActivity
 ```
 
 ---
 
+## 파일 구조 (Phase 2b 관련)
+
+### 새로 생성된 파일
+
+| 파일 | 역할 | 상태 |
+|------|------|------|
+| `ml/src/model_ball.py` | BallDetector 모델 정의 (MobileNetV3+decoder) | 완료 |
+| `ml/src/train_ball.py` | 학습 스크립트 (standalone) | 완료 |
+| `ml/src/export_ball_onnx.py` | ONNX 변환 + 검증 | 완료 |
+| `ml/src/download_ball_videos.py` | 22개 YouTube 영상 다운로드 + 프레임 추출 | 완료 |
+| `ml/notebooks/BallDetector_Training.ipynb` | **Kaggle 학습 노트북 v2** (인라인, 파일 import 불필요) | 완료 |
+| `court-detection/.../BallKalmanFilter.kt` | 6-state 칼만 필터 | 완료 |
+| `docs/superpowers/specs/2026-03-21-phase2b-ball-detector-design.md` | Phase 2b 설계 스펙 | 완료 |
+
+### 수정된 파일
+
+| 파일 | 변경 내용 |
+|------|-----------|
+| `court-detection/.../BallTrackingDetector.kt` | 3-frame→1-frame, 9ch→3ch, 128×320→192×192, ImageNet normalization 추가 |
+| `app/.../CameraViewModel.kt` | BallKalmanFilter import, updateBallWithKalman() 추가, unlockCourt()에서 kalman reset |
+
+### 데이터 (git에 포함 안됨)
+
+```
+ml/data/phone_ball/
+├── videos/           # 18개 영상 (01-22, 일부 누락)
+├── frames/           # 87,601 프레임 (5fps 추출)
+├── frames_sampled/   # 3,600 프레임 (라벨링용, 영상당 200장)
+└── ball_annotations.json  # 라벨링 결과 (생성 예정)
+```
+
+---
+
+## 기술 상세
+
+### BallDetector 아키텍처
+```
+Input [1, 3, 192, 192]
+  ↓ MobileNetV3-Small features (pretrained, 927K params)
+  ↓ [1, 576, 6, 6]
+  ↓ ConvTranspose2d 576→128 (stride 2) + BN + ReLU + Dropout(0.15)
+  ↓ ConvTranspose2d 128→64  (stride 2) + BN + ReLU + Dropout(0.15)
+  ↓ ConvTranspose2d 64→32   (stride 2) + BN + ReLU
+  ↓ Conv2d 32→1 (1×1)
+  ↓ Sigmoid
+Output [1, 1, 48, 48] heatmap
+```
+
+### 학습 전략 (v2)
+- **Freeze backbone** 5 epochs → **Unfreeze**
+- **Separate LR**: backbone 1e-4, decoder 1e-3
+- **Optimizer**: AdamW (weight_decay=1e-4)
+- **Loss**: Focal loss (alpha=0.97, gamma=2.0)
+- **Augmentation**: horizontal flip, Gaussian blur, brightness, color shift, noise, contrast
+- **Early stopping**: patience 20, **val_pixel_error 기준** (v1은 val_loss 기준이었음)
+- **Best model 이중 저장**: `ball_best.pth` (pixel error), `ball_best_loss.pth` (val_loss)
+- **Heatmap**: 48×48, Gaussian sigma=2.5, argmax extraction
+
+### 칼만 필터 (BallKalmanFilter.kt)
+```
+State: [x, y, vx, vy, ax, ay]
+PROCESS_NOISE_POS = 5.0
+MEASUREMENT_NOISE = 8.0
+GATE_DISTANCE = 150px
+MAX_PREDICT_FRAMES = 3
+```
+- detect 성공 → update(measurement) → 보정된 위치
+- detect 실패 → predict() → 물리 기반 예측 (최대 3프레임)
+- 3프레임 초과 미검출 → lost 상태
+
+### 핸드폰 촬영 영상 (22개 URL)
+
+메모리 파일 참조: `~/.claude/projects/.../memory/reference_ball_training_videos.md`
+
+다운로드된 영상: 01, 02, 03, 04, 05, 06, 07, 08, 09, 10, 12, 14, 15, 16, 18, 19, 21, 22 (18개)
+누락된 영상: 11, 13, 17, 20 (30분 초과 duration filter)
+
+---
+
+## 이전 Phase 완료 사항
+
+### Phase 1: 코트 인식 (완료)
+- MobileNetV3-Small 히트맵 모델, 0.68px 오차
+- 961장 라벨링 데이터 (YouTube 339 + SNTC 622)
+- Android 앱: 카메라 프리뷰 + 코트 라인 오버레이 + 키포인트 시각화
+- ONNX Runtime 배포 (TFLite 변환 실패로 전환)
+
+### Phase 2a: TrackNet v1 (완료 → 폐기)
+- 3-frame TrackNet, 148ms 추론, 6fps → **모바일 부적합**
+- 코트 잠금 모드, 스크린샷 캡처, 네온 코트 오버레이 등 UI 완성
+
+---
+
 ## 환경 설정
 
 ### Android 빌드 환경
-
-- **Gradle**: 8.9
-- **AGP**: 8.7.3
-- **Kotlin**: 2.0.21
+- **Gradle**: 8.9, **AGP**: 8.7.3, **Kotlin**: 2.0.21
 - **compileSdk**: 35, **minSdk**: 26, **targetSdk**: 35
 - **Java**: 17 (Android Studio JBR)
-- **주의**: 프로젝트 경로에 한글 포함 → `android.overridePathCheck=true` 필수
+- `gradle.properties`: `android.overridePathCheck=true` (한글 경로 대응)
 
 ### Python ML 환경
-
 ```bash
-# Python 3.14는 TensorFlow/albumentations와 호환 안됨 → 3.12 사용
 cd ml
 python -m uv venv .venv312 --python 3.12
 python -m uv pip install --python .venv312/Scripts/python.exe -r requirements.txt
 ```
 
-### 모델 변환 파이프라인
-
+### Kaggle 학습 환경 (P100 호환)
 ```
-[v1] PyTorch (NCHW) → ONNX (opset 18) → onnx2tf → TFLite (NHWC)  ← 더 이상 사용 안 함
-[v2] PyTorch (NCHW) → ONNX (opset 18) → ONNX Runtime (Android)   ← 현재 사용 중
+pip install torch==2.2.0+cu118 torchvision==0.17.0+cu118 --index-url https://download.pytorch.org/whl/cu118
+pip install "numpy<2"
 ```
-
-TFLite 변환 실패 원인: onnx2tf가 히트맵 decoder의 skip connection(ConvTranspose2d + concat)을 처리하지 못함.
-ONNX Runtime은 NCHW를 그대로 사용하므로 변환 문제 없음.
-
-### 데이터셋
-
-- **방송 데이터**: yastrebksv/TennisCourtDetector (MIT 라이선스, Kaggle)
-- **핸드폰 데이터**: 총 961장 라벨링 완료
-  - YouTube 동호인 영상: 339장 (`ml/data/youtube/labeled_annotations.json`)
-  - SNTC YouTube 채널: 678 동영상에서 753 프레임 추출, 462장 라벨링
-  - SNTC selected: 160장 추가 라벨링
-  - 합계: 339 + 462 + 160 = 961장
-
-**키포인트 매핑 (yastrebksv → SHOT):**
-
-| SHOT ID | 설명 | yastrebksv index |
-|---------|------|-----------------|
-| 9 | 서비스라인 singles left | 10 |
-| 10 | 서비스라인 center mark | 13 |
-| 11 | 서비스라인 singles right | 11 |
-| 12 | 베이스라인 doubles left | 2 |
-| 13 | 베이스라인 singles left | 5 |
-| 14 | 베이스라인 center mark | midpoint(2, 3) |
-| 15 | 베이스라인 singles right | 7 |
-| 16 | 베이스라인 doubles right | 3 |
-
----
-
-## 남은 작업 (우선순위 순)
-
-### Phase 1C: 검출 파이프라인 품질 개선 (즉시)
-
-1. [x] ~~호모그래피 정밀도 개선~~ → 오버레이 지터 수정 (deadzone, 3-frame gate, stabilization)
-2. [x] ~~False positive 제거~~ → 개선됨
-3. [ ] **실제 코트에서 필드 테스트** (최우선)
-4. [ ] Android Studio Gradle sync 해결 (Run 버튼 활성화)
-
-### Phase 1D: UI 및 마무리
-
-5. [ ] 설정 화면 (해상도, 단식/복식, 언어)
-6. [ ] 영상 녹화 (CameraX VideoCapture)
-7. [ ] FPS 계산 구현 (현재 TODO 상태)
-
-### Phase 1E: 검증
-
-8. [ ] 완료 게이트: 10초 연속 95% 프레임 성공
-9. [ ] 20개 다양한 코트에서 테스트
-
-### Phase 2: 볼 추적 (현재 진행 중)
-
-**Phase 2a: TrackNet v1 (완료 — 실기기 테스트 결과 한계 확인)**
-
-- [x] TrackNet 모델 학습 (공개 데이터셋 19,835프레임, Kaggle P100)
-- [x] ONNX 변환 (7.36MB, opset 18, max diff 1.3e-7)
-- [x] Android BallTrackingDetector 구현 (3-frame buffer, heatmap argmax)
-- [x] CameraViewModel 통합 (ballPosition StateFlow)
-- [x] CameraScreen BallOverlay UI (오렌지 마커 + 십자선 + 디버그 신뢰도)
-- [x] 실기기 테스트 완료 (갤럭시, 방송 영상 + 실제 코트)
-- [x] 코트 잠금 모드 구현 (LOCK/UNLOCK + G센서 움직임 감지)
-- [x] 스크린샷 캡처 버튼 구현 (Pictures/SHOT/ 저장)
-- [x] 볼 마커 persistence (4프레임 grace period)
-- [x] 파코트 오버레이 필터링 완화 (16/16 표시 성공)
-- [x] 네온 형광 코트 라인 + 전체 실선
-
-**TrackNet v1 실기기 테스트 결과:**
-
-| 항목 | 결과 | 문제 |
-|------|------|------|
-| FPS | 5.8-8.2 (LOCK 시에도 ~6) | 볼 ONNX 추론 **148ms**가 병목 |
-| 볼 정확도 | 감지는 되나 위치 부정확 | 방송 영상 학습 vs 핸드폰 도메인 갭 |
-| 볼 속도 | 빠른 공 추적 불가 | 6fps에서 프레임 간 공 7m 이동 |
-| 발열 | 심함 | 코트+볼 ONNX 연속 추론 |
-| 코트 인식 | 니어코트 정확, 파코트 16/16 표시 | 양호 |
-| 코트 잠금 | 정상 작동 | G센서 알림 정상 |
-
-**결론: TrackNet 3-frame 아키텍처는 모바일에 부적합. 아키텍처 전면 교체 필요.**
-
-**Phase 2b: 경량 단일프레임 검출기 + 칼만 필터 (다음 작업)**
-
-현재 TrackNet의 근본 한계:
-- 3프레임 입력 [1,9,128,320] = 37만 float → 148ms 추론
-- 30fps 방송 영상 학습 → 6fps에서 시간적 정보 깨짐
-- 방송 도메인 학습 → 핸드폰 카메라 도메인 갭
-
-변경 계획:
-```
-[현재] 3프레임 → TrackNet (148ms) → 위치         → 6fps
-[변경] 1프레임 → 경량 검출기 (15-25ms) → 칼만 필터 → 30-50fps
-```
-
-**새 모델 설계:**
-- 백본: MobileNetV3-Small (코트 검출과 동일, 디바이스 검증 완료)
-- 헤드: 경량 디코더 → 히트맵 [1, 1, 48, 48]
-- 입력: 단일 프레임 [1, 3, 192, 192]
-- 파라미터: ~200K (현재 1.93M의 1/10)
-- INT8 양자화 적용
-
-**목표 스펙:**
-
-| 지표 | 목표 |
-|------|------|
-| FPS (FP32) | 25-35 |
-| FPS (INT8) | 35-50 |
-| FPS (LOCK + INT8) | 40-60 |
-| 검출률 | 85-92% |
-| 위치 오차 | < 15px (1280×720 기준) |
-| 궤적 연속성 | 95%+ (칼만 필터 보정 후) |
-| False positive | < 3% |
-
-**칼만 필터 트래킹:**
-- 물리 기반 상태 추정 (속도, 가속도, 중력)
-- 검출 성공 시: 실측 → 상태 보정
-- 검출 실패 시: 물리 기반 위치 예측 (1-2프레임 오차 < 2px)
-- 30fps에서 대부분 프레임 검출 성공 → 예측은 갭 보충용
-
-**실행 계획 (총 5-7일):**
-
-| Phase | 내용 | 기간 |
-|-------|------|------|
-| 2b-1 | 학습 데이터 구축 (SNTC 영상 추출 + 라벨링, 30,000+ 프레임) | 2-3일 |
-| 2b-2 | 경량 모델 설계 + 학습 + INT8 양자화 (Kaggle P100) | 1-2일 |
-| 2b-3 | 칼만 필터 트래킹 구현 | 1일 |
-| 2b-4 | Android 통합 + 실기기 테스트 | 1일 |
-
-### 향후
-
-- [x] ~~YouTube 영상 추가 수집 → 1,000장+ 목표~~ → 961장 달성 (목표 근접)
-- [x] ~~모델 예측 보조 라벨링으로 효율화~~ → 라벨 복사 기능 구현
-- [ ] 볼 착지점 판정 (궤적 + 코트 좌표계 교차점)
-- [ ] INT8 양자화 검토 (FP32 → 모바일 속도 개선용)
+P100 = CUDA compute 6.0 (sm_60), PyTorch 2.10+ (cu128)는 호환 안됨.
 
 ---
 
@@ -426,32 +218,27 @@ ONNX Runtime은 NCHW를 그대로 사용하므로 변환 문제 없음.
 
 | 커밋 | 내용 |
 |------|------|
-| `2f25931` | Phase 1 초기 구현 (Android 스캐폴딩 + ML 파이프라인) |
-| `4b9fed9` | 학습된 TFLite 모델 추가 (4.25MB) |
-| `4eabb29` | Phase 1 인수인계 문서 추가 |
-| `62e58fc` | 키포인트 라벨링 도구 + TFLite 미리보기 생성기 |
-| `74bdb09` | YouTube 데이터 수집 파이프라인 추가 |
-| `dbf8ad2` | 비교 학습 스크립트 + 라벨링 완료 업데이트 |
-| `75e12bb` | 학습 셋업 스크립트 + 데스크탑 전환 업데이트 |
-| `d87bb81` | 히트맵 모델 + 3단계 학습 + Colab 노트북 |
-| `ec065a7` | 히트맵 3-stage 결과 기록: 2.41px 달성 |
-| `0fa22a1` | 인수인계 업데이트: Android 통합 단계 전환 |
-| (현재) | Android 빌드 성공 + 실기기 설치 + 파이프라인 연결 + 테스트 |
+| `2f25931` | Phase 1 초기 구현 |
+| `4b9fed9` | TFLite 모델 추가 |
+| `4eabb29` | Phase 1 인수인계 |
+| `62e58fc` | 키포인트 라벨링 도구 |
+| `74bdb09` | YouTube 데이터 수집 |
+| `dbf8ad2` | 비교 학습 스크립트 |
+| `75e12bb` | 학습 셋업 + 데스크탑 전환 |
+| `d87bb81` | 히트맵 모델 + 3단계 학습 |
+| `ec065a7` | 히트맵 3-stage v2 (0.68px) |
+| `0fa22a1` | Android 통합 |
+| (이전) | Phase 2a TrackNet + UI완성 |
+| **(현재)** | **Phase 2b 경량 볼 검출기 + 칼만 필터 + v2 학습 노트북** |
 
 **원격 저장소**: https://github.com/kokoro456/SHOT-AI
 
 ---
 
-## 오답노트
+## 오답노트 (Phase 2b)
 
-자세한 실패 분석 및 교훈은 `docs/RETROSPECTIVE.md` 참조.
-
-**핵심 요약:**
-1. FC direct regression은 공간 정보 손실 → 히트맵 기반으로 변경 → **2.41px → 0.68px 달성!**
-2. 데이터 스케일링 효과 입증: 339장 → 961장 = 2.41px → 0.68px (3.5배 개선)
-3. 단순 합산보다 3단계 학습 (pretrain → mixed → fine-tune)
-4. soft-argmax 함정: 평평한 히트맵에서 중심(0.5,0.5)으로 수렴 → argmax 사용
-5. 테스트는 반드시 타겟 도메인(핸드폰)으로
-6. Colab에서 broadcast 이미지 전처리(256x256 JPEG) 필수 → 6배 속도 향상
-7. TFLite 변환 실패 → ONNX Runtime이 대안 (skip connection 있는 decoder 구조에서)
-8. 데이터 양 vs 모델 구조: 같은 모델에서 데이터 3배 → 오차 3.5배 감소
+1. **val_loss ≠ 실제 성능**: val_loss 기준 best model(epoch 0, 9.3px)보다 val_pixel_error 기준(epoch 13, 7.8px)이 실제로 더 좋음 → v2에서 이중 저장으로 해결
+2. **과적합**: backbone unfreeze 후 val_loss 증가하지만 pixel error는 개선됨 → Dropout + weight decay 추가
+3. **Kaggle 세션 만료**: 학습 결과가 세션 종료 시 소실됨 → ONNX export까지 한 세션에서 완료해야 함
+4. **yt-dlp 호환성**: `--js-runtimes nodejs`는 무효, `node`가 올바름. `--quiet` 플래그가 에러 숨김
+5. **Kaggle P100**: CUDA compute 6.0, PyTorch 2.2.0+cu118까지만 호환

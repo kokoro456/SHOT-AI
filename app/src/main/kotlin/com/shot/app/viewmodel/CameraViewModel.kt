@@ -20,6 +20,7 @@ import com.shot.court.TemporalSmoother
 import com.shot.core.model.CourtDetectionResult
 import com.shot.core.model.DetectionStatus
 import com.shot.core.model.Keypoint
+import com.shot.detection.BallKalmanFilter
 import com.shot.detection.BallTrackingDetector
 import com.shot.detection.CourtKeypointDetector
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -41,12 +42,13 @@ class CameraViewModel @Inject constructor(
     // ML pipeline components
     private val detector = CourtKeypointDetector(application)
     private val ballDetector = BallTrackingDetector(application)
+    private val ballKalmanFilter = BallKalmanFilter()
     private val homographyCalculator = HomographyCalculator()
     private val projector = CourtProjector(homographyCalculator)
     private val validator = HomographyValidator()
     private val smoother = TemporalSmoother()
 
-    // Note: ball detection runs synchronously to preserve 3-frame temporal consistency
+    // Ball detection: single-frame model + Kalman filter for temporal tracking
 
     // Output-level stabilization
     private var lastEmittedProjected: List<Keypoint>? = null
@@ -139,6 +141,7 @@ class CameraViewModel @Inject constructor(
         _isCourtLockedFlow.value = false
         _cameraMovedAlert.value = false
         smoother.reset()
+        ballKalmanFilter.reset()
         lastEmittedProjected = null
         lastEmittedH = null
 
@@ -272,28 +275,44 @@ class CameraViewModel @Inject constructor(
         return totalDist / count < outputDeadzoneThreshold
     }
 
-    // --- Ball persistence logic ---
+    // --- Ball tracking with Kalman filter ---
 
-    private fun updateBallWithPersistence(newBall: BallTrackingDetector.BallPosition?) {
-        if (newBall != null && newBall.detected) {
-            // Ball detected this frame
-            lastDetectedBall = newBall
-            ballMissFrameCount = 0
-            _ballPosition.value = newBall
-        } else {
-            // Ball not detected this frame
-            ballMissFrameCount++
-            if (ballMissFrameCount <= ballGraceFrames && lastDetectedBall != null) {
-                // Grace period: keep showing last known position with fading confidence
-                val fadeFactor = 1f - (ballMissFrameCount.toFloat() / (ballGraceFrames + 1))
-                _ballPosition.value = lastDetectedBall!!.copy(
-                    confidence = lastDetectedBall!!.confidence * fadeFactor
-                )
+    private fun updateBallWithKalman(newBall: BallTrackingDetector.BallPosition) {
+        // Step 1: Predict next state
+        ballKalmanFilter.predict()
+
+        if (newBall.detected) {
+            // Step 2a: Detection succeeded — update Kalman with measurement
+            val accepted = ballKalmanFilter.update(newBall.x, newBall.y)
+            if (accepted) {
+                lastDetectedBall = newBall
+                ballMissFrameCount = 0
+                _ballPosition.value = newBall
             } else {
-                // Grace period expired
-                _ballPosition.value = newBall  // null or not-detected
-                lastDetectedBall = null
+                // Measurement rejected (outlier) — use Kalman prediction
+                emitKalmanPrediction()
             }
+        } else {
+            // Step 2b: Detection failed — use Kalman prediction
+            ballKalmanFilter.markMiss()
+            ballMissFrameCount++
+            emitKalmanPrediction()
+        }
+    }
+
+    private fun emitKalmanPrediction() {
+        val pos = ballKalmanFilter.getPosition()
+        if (pos != null) {
+            val confidence = ballKalmanFilter.getConfidence()
+            _ballPosition.value = BallTrackingDetector.BallPosition(
+                x = pos.first,
+                y = pos.second,
+                confidence = confidence,
+                detected = true  // Kalman-predicted position
+            )
+        } else {
+            _ballPosition.value = null
+            lastDetectedBall = null
         }
     }
 
@@ -310,7 +329,7 @@ class CameraViewModel @Inject constructor(
             if (isCourtLocked) {
                 val bitmap = imageProxyToBitmap(imageProxy)
                 val ballResult = ballDetector.detect(bitmap, imageWidth, imageHeight)
-                updateBallWithPersistence(ballResult)
+                updateBallWithKalman(ballResult)
                 bitmap.recycle()
 
                 val locked = lockedDetectionResult
@@ -334,7 +353,7 @@ class CameraViewModel @Inject constructor(
 
             // Ball detection (synchronous, preserves 3-frame temporal order)
             val ballResult = ballDetector.detect(bitmap, imageWidth, imageHeight)
-            updateBallWithPersistence(ballResult)
+            updateBallWithKalman(ballResult)
 
             // Step 1: Detect keypoints
             val keypoints = detector.detect(bitmap, imageWidth, imageHeight)
