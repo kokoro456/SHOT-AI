@@ -41,6 +41,14 @@ class BallKalmanFilter {
     private var initialized = false
     private var missCount = 0
 
+    // Bounce detection
+    private var prevVy: Float = 0f
+    private var bounceDetected: Boolean = false
+    private var lastBounceX: Float = 0f
+    private var lastBounceY: Float = 0f
+    private var bounceFrameCount: Int = 0
+    private val BOUNCE_COOLDOWN = 10 // minimum frames between bounces
+
     /** True if the filter has a valid state (initialized and not expired) */
     val isActive: Boolean get() = initialized && missCount <= MAX_PREDICT_FRAMES
 
@@ -174,10 +182,53 @@ class BallKalmanFilter {
         return (uncertaintyFactor * missFactor).coerceIn(0f, 1f)
     }
 
+    /**
+     * Detect ball bounce by monitoring vertical velocity sign change.
+     * A bounce occurs when vy changes from positive (falling) to negative (rising).
+     * Returns the bounce position if a bounce was just detected, null otherwise.
+     */
+    fun detectBounce(): Pair<Float, Float>? {
+        if (!isActive) return null
+
+        val currentVy = x[3] // vy
+        bounceFrameCount++
+
+        // Bounce = vy was positive (ball going down) and now negative (ball going up)
+        // Require minimum velocity to avoid noise
+        val isBounce = prevVy > 2f && currentVy < -1f && bounceFrameCount > BOUNCE_COOLDOWN
+
+        prevVy = currentVy
+
+        if (isBounce) {
+            bounceDetected = true
+            lastBounceX = x[0] // x
+            lastBounceY = x[1] // y
+            bounceFrameCount = 0
+            return Pair(lastBounceX, lastBounceY)
+        }
+
+        bounceDetected = false
+        return null
+    }
+
+    /**
+     * Get the last detected bounce position.
+     */
+    fun getLastBounce(): Pair<Float, Float>? {
+        return if (lastBounceX != 0f || lastBounceY != 0f) {
+            Pair(lastBounceX, lastBounceY)
+        } else null
+    }
+
     fun reset() {
         x.fill(0f)
         P.fill(0f)
         initialized = false
         missCount = 0
+        prevVy = 0f
+        bounceDetected = false
+        lastBounceX = 0f
+        lastBounceY = 0f
+        bounceFrameCount = 0
     }
 }

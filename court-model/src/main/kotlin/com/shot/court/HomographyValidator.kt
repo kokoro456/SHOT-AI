@@ -11,7 +11,7 @@ class HomographyValidator(
 ) {
 
     companion object {
-        const val MAX_REPROJECTION_ERROR = 50f
+        const val MAX_REPROJECTION_ERROR = 35f    // 50→35: 더 엄격한 검증
     }
 
     fun isValid(homography: FloatArray, detectedKeypoints: List<Keypoint>): Boolean {

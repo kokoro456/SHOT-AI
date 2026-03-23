@@ -45,6 +45,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectDragGestures
+import kotlin.math.sqrt
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
@@ -111,6 +114,8 @@ fun CameraScreen(
     val isDebugMode by viewModel.isDebugMode.collectAsState()
     val isCourtLocked by viewModel.isCourtLockedFlow.collectAsState()
     val cameraMovedAlert by viewModel.cameraMovedAlert.collectAsState()
+    val landingSpots by viewModel.landingSpots.collectAsState()
+    val adjustingKeypointId by viewModel.adjustingKeypointId.collectAsState()
 
     val context = LocalContext.current
     val view = LocalView.current
@@ -155,12 +160,19 @@ fun CameraScreen(
             modifier = Modifier.fillMaxSize()
         )
 
-        // Layer 2: Court Line Overlay
+        // Layer 2: Court Line Overlay + Keypoint Drag + Landing Spots
         CourtOverlay(
             projectedKeypoints = detectionResult.projectedKeypoints,
             detectedKeypoints = detectionResult.detectedKeypoints,
             isDebugMode = isDebugMode,
-            isLocked = isCourtLocked
+            isLocked = isCourtLocked,
+            landingSpots = landingSpots,
+            adjustingKeypointId = adjustingKeypointId,
+            onKeypointDrag = { id, imageX, imageY ->
+                viewModel.updateKeypoint(id, imageX, imageY)
+            },
+            onDragStart = { id -> viewModel.setAdjustingKeypoint(id) },
+            onDragEnd = { viewModel.setAdjustingKeypoint(null) }
         )
 
         // Layer 2.5: Ball Position Overlay
@@ -227,6 +239,30 @@ fun CameraScreen(
                     .fillMaxSize()
                     .background(Color.White.copy(alpha = 0.6f))
             )
+        }
+
+        // Layer 5.5: Far court add button (only when court detected and not locked)
+        val farCourtAdded by viewModel.farCourtPointsAdded.collectAsState()
+        if (detectionResult.status != DetectionStatus.NOT_DETECTED && !isCourtLocked && !farCourtAdded) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(top = 80.dp, end = 16.dp)
+                    .background(
+                        Color(0xFF1E88E5).copy(alpha = 0.85f),
+                        RoundedCornerShape(20.dp)
+                    )
+                    .clickable { viewModel.addFarCourtPoints() }
+                    .padding(horizontal = 14.dp, vertical = 8.dp)
+            ) {
+                Text(
+                    text = "+ FAR COURT",
+                    color = Color.White,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace
+                )
+            }
         }
 
         // Layer 6: Bottom bar
@@ -383,7 +419,12 @@ private fun CourtOverlay(
     projectedKeypoints: List<Keypoint>,
     detectedKeypoints: List<Keypoint>,
     isDebugMode: Boolean,
-    isLocked: Boolean = false
+    isLocked: Boolean = false,
+    landingSpots: List<CameraViewModel.LandingSpot> = emptyList(),
+    adjustingKeypointId: Int? = null,
+    onKeypointDrag: (Int, Float, Float) -> Unit = { _, _, _ -> },
+    onDragStart: (Int) -> Unit = {},
+    onDragEnd: () -> Unit = {}
 ) {
     if (projectedKeypoints.isEmpty()) return
 
@@ -396,7 +437,71 @@ private fun CourtOverlay(
     val farColor = if (isLocked) ShotColors.lockBlue.copy(alpha = 0.65f) else ShotColors.courtLineFar
     val farGlow = if (isLocked) ShotColors.lockBlue.copy(alpha = 0.15f) else ShotColors.courtLineFarGlow
 
-    Canvas(modifier = Modifier.fillMaxSize()) {
+    // Landing spot colors
+    val inColor = Color(0xFF00E676)  // green
+    val outColor = Color(0xFFFF1744) // red
+
+    // Drag state
+    var draggingId by remember { mutableStateOf<Int?>(null) }
+
+    // Store scale/offset for touch conversion
+    var currentScaleX by remember { mutableFloatStateOf(1f) }
+    var currentScaleY by remember { mutableFloatStateOf(1f) }
+    var currentOffsetX by remember { mutableFloatStateOf(0f) }
+    var currentOffsetY by remember { mutableFloatStateOf(0f) }
+
+    val dragModifier = if (!isLocked) {
+        Modifier.pointerInput(detectedKeypoints) {
+            detectDragGestures(
+                onDragStart = { offset ->
+                    // Find nearest keypoint within 40dp
+                    val threshold = 40f * density
+                    var minDist = Float.MAX_VALUE
+                    var nearestId: Int? = null
+
+                    for (kp in detectedKeypoints) {
+                        val screenX = kp.x * currentScaleX + currentOffsetX
+                        val screenY = kp.y * currentScaleY + currentOffsetY
+                        val dx = offset.x - screenX
+                        val dy = offset.y - screenY
+                        val dist = sqrt(dx * dx + dy * dy)
+                        if (dist < threshold && dist < minDist) {
+                            minDist = dist
+                            nearestId = kp.id
+                        }
+                    }
+
+                    draggingId = nearestId
+                    if (nearestId != null) onDragStart(nearestId)
+                },
+                onDrag = { change, dragAmount ->
+                    change.consume()
+                    val id = draggingId ?: return@detectDragGestures
+
+                    // Find current keypoint position
+                    val kp = detectedKeypoints.find { it.id == id } ?: return@detectDragGestures
+
+                    // Convert drag delta from screen to image coordinates
+                    val newImageX = kp.x + dragAmount.x / currentScaleX
+                    val newImageY = kp.y + dragAmount.y / currentScaleY
+
+                    onKeypointDrag(id, newImageX, newImageY)
+                },
+                onDragEnd = {
+                    draggingId = null
+                    onDragEnd()
+                },
+                onDragCancel = {
+                    draggingId = null
+                    onDragEnd()
+                }
+            )
+        }
+    } else {
+        Modifier
+    }
+
+    Canvas(modifier = Modifier.fillMaxSize().then(dragModifier)) {
         val imageAspect = 1280f / 720f
         val canvasAspect = size.width / size.height
 
@@ -417,11 +522,23 @@ private fun CourtOverlay(
             offsetY = (size.height - 720f * scaleY) / 2f
         }
 
+        // Store for touch conversion
+        currentScaleX = scaleX
+        currentScaleY = scaleY
+        currentOffsetX = offsetX
+        currentOffsetY = offsetY
+
         fun toScreen(kp: Keypoint) = Offset(
             kp.x * scaleX + offsetX,
             kp.y * scaleY + offsetY
         )
 
+        fun toScreenXY(x: Float, y: Float) = Offset(
+            x * scaleX + offsetX,
+            y * scaleY + offsetY
+        )
+
+        // Draw court lines
         for ((startId, endId) in ItfCourtSpec.COURT_LINES) {
             val start = keypointMap[startId] ?: continue
             val end = keypointMap[endId] ?: continue
@@ -430,57 +547,77 @@ private fun CourtOverlay(
             val lineColor = if (isNearLine) nearColor else farColor
             val glowColor = if (isNearLine) nearGlow else farGlow
 
-            // All lines solid, near thicker than far
             val coreWidth = if (isNearLine) 4.0f else 2.5f
             val glowWidth = if (isNearLine) 12f else 8f
 
             val startPt = toScreen(start)
             val endPt = toScreen(end)
 
-            // Layer 1: Wide glow (neon bloom effect)
-            drawLine(
-                color = glowColor,
-                start = startPt,
-                end = endPt,
-                strokeWidth = glowWidth,
-                cap = StrokeCap.Round
-            )
-
-            // Layer 2: Core line (bright center)
-            drawLine(
-                color = lineColor,
-                start = startPt,
-                end = endPt,
-                strokeWidth = coreWidth,
-                cap = StrokeCap.Round
-            )
+            drawLine(color = glowColor, start = startPt, end = endPt,
+                strokeWidth = glowWidth, cap = StrokeCap.Round)
+            drawLine(color = lineColor, start = startPt, end = endPt,
+                strokeWidth = coreWidth, cap = StrokeCap.Round)
         }
 
-        // Draw keypoints (skip when locked)
+        // Draw keypoints (always show when detected, highlight when dragging)
         if (!isLocked) {
             for (kp in detectedKeypoints) {
                 val center = toScreen(kp)
-                val color = when (ConfidenceLevel.from(kp.confidence)) {
-                    ConfidenceLevel.HIGH -> ShotColors.kpHigh
-                    ConfidenceLevel.MEDIUM -> ShotColors.kpMedium
-                    ConfidenceLevel.LOW -> ShotColors.kpLow
+                val isDragging = kp.id == draggingId || kp.id == adjustingKeypointId
+                val color = if (isDragging) ShotColors.lockBlue else {
+                    when (ConfidenceLevel.from(kp.confidence)) {
+                        ConfidenceLevel.HIGH -> ShotColors.kpHigh
+                        ConfidenceLevel.MEDIUM -> ShotColors.kpMedium
+                        ConfidenceLevel.LOW -> ShotColors.kpLow
+                    }
                 }
 
-                drawCircle(color = color.copy(alpha = 0.25f), radius = 16f, center = center)
-                drawCircle(color = color, radius = 6f, center = center)
-                drawCircle(
-                    color = Color.White.copy(alpha = 0.7f),
-                    radius = 6f, center = center,
-                    style = Stroke(width = 1.5f)
-                )
+                val radius = if (isDragging) 10f else 6f
+                val haloRadius = if (isDragging) 24f else 16f
 
-                if (isDebugMode) {
-                    drawCircle(
-                        color = color.copy(alpha = 0.5f),
-                        radius = 11f, center = center,
-                        style = Stroke(width = 1.5f)
-                    )
+                drawCircle(color = color.copy(alpha = 0.25f), radius = haloRadius, center = center)
+                drawCircle(color = color, radius = radius, center = center)
+                drawCircle(color = Color.White.copy(alpha = 0.7f),
+                    radius = radius, center = center, style = Stroke(width = 1.5f))
+
+                // Crosshair guide when dragging
+                if (isDragging) {
+                    val crossLen = 30f
+                    drawLine(color.copy(alpha = 0.6f),
+                        Offset(center.x - crossLen, center.y), Offset(center.x - 12f, center.y),
+                        strokeWidth = 1f, cap = StrokeCap.Round)
+                    drawLine(color.copy(alpha = 0.6f),
+                        Offset(center.x + 12f, center.y), Offset(center.x + crossLen, center.y),
+                        strokeWidth = 1f, cap = StrokeCap.Round)
+                    drawLine(color.copy(alpha = 0.6f),
+                        Offset(center.x, center.y - crossLen), Offset(center.x, center.y - 12f),
+                        strokeWidth = 1f, cap = StrokeCap.Round)
+                    drawLine(color.copy(alpha = 0.6f),
+                        Offset(center.x, center.y + 12f), Offset(center.x, center.y + crossLen),
+                        strokeWidth = 1f, cap = StrokeCap.Round)
                 }
+            }
+        }
+
+        // Draw landing spots (bounce markers)
+        for ((index, spot) in landingSpots.withIndex()) {
+            val center = toScreenXY(spot.imageX, spot.imageY)
+            val alpha = 1f - (index * 0.08f).coerceAtMost(0.8f) // fade older spots
+            val spotColor = if (spot.isIn) inColor else outColor
+
+            // Outer glow
+            drawCircle(color = spotColor.copy(alpha = alpha * 0.3f), radius = 20f, center = center)
+            // Inner circle
+            drawCircle(color = spotColor.copy(alpha = alpha * 0.8f), radius = 8f, center = center)
+            // White outline
+            drawCircle(color = Color.White.copy(alpha = alpha * 0.6f),
+                radius = 8f, center = center, style = Stroke(width = 1.5f))
+
+            // IN/OUT text (only for most recent)
+            if (index == 0) {
+                drawCircle(color = spotColor.copy(alpha = 0.9f), radius = 12f, center = center)
+                drawCircle(color = Color.White, radius = 12f, center = center,
+                    style = Stroke(width = 2f))
             }
         }
     }

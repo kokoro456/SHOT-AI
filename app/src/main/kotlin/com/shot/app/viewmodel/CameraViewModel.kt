@@ -13,10 +13,12 @@ import androidx.camera.view.PreviewView
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.findViewTreeLifecycleOwner
 import com.shot.camera.CameraManager
+import com.shot.camera.LensDistortionCorrector
 import com.shot.court.CourtProjector
 import com.shot.court.HomographyCalculator
 import com.shot.court.HomographyValidator
 import com.shot.court.TemporalSmoother
+import com.shot.core.ItfCourtSpec
 import com.shot.core.model.CourtDetectionResult
 import com.shot.core.model.DetectionStatus
 import com.shot.core.model.Keypoint
@@ -47,6 +49,8 @@ class CameraViewModel @Inject constructor(
     private val projector = CourtProjector(homographyCalculator)
     private val validator = HomographyValidator()
     private val smoother = TemporalSmoother()
+    private val lensCorrector = LensDistortionCorrector(application, 1280, 720)
+    private val shouldUndistort = lensCorrector.hasSignificantDistortion()
 
     // Ball detection: single-frame model + Kalman filter for temporal tracking
 
@@ -102,6 +106,27 @@ class CameraViewModel @Inject constructor(
     private val _cameraMovedAlert = MutableStateFlow(false)
     val cameraMovedAlert: StateFlow<Boolean> = _cameraMovedAlert.asStateFlow()
 
+    // --- Ball landing spots ---
+    data class LandingSpot(
+        val imageX: Float, val imageY: Float,
+        val courtX: Float, val courtY: Float,
+        val isIn: Boolean,
+        val timestamp: Long = System.currentTimeMillis()
+    )
+
+    private val _landingSpots = MutableStateFlow<List<LandingSpot>>(emptyList())
+    val landingSpots: StateFlow<List<LandingSpot>> = _landingSpots.asStateFlow()
+    private val maxLandingSpots = 10 // 최근 10개만 유지
+
+    // --- Keypoint adjustment ---
+    private val _adjustingKeypointId = MutableStateFlow<Int?>(null)
+    val adjustingKeypointId: StateFlow<Int?> = _adjustingKeypointId.asStateFlow()
+
+    private var manualKeypoints: MutableList<Keypoint>? = null
+
+    private val _farCourtPointsAdded = MutableStateFlow(false)
+    val farCourtPointsAdded: StateFlow<Boolean> = _farCourtPointsAdded.asStateFlow()
+
     fun bindCamera(previewView: PreviewView) {
         if (isCameraBound) return
         val lifecycleOwner = previewView.findViewTreeLifecycleOwner() ?: return
@@ -111,6 +136,97 @@ class CameraViewModel @Inject constructor(
             lifecycleOwner = lifecycleOwner,
             onFrame = { imageProxy -> processFrame(imageProxy) }
         )
+    }
+
+    // --- Keypoint Manual Adjustment ---
+
+    /**
+     * Update a single keypoint position (user drag).
+     * Recomputes homography and reprojects all 16 keypoints.
+     */
+    fun updateKeypoint(keypointId: Int, imageX: Float, imageY: Float) {
+        val current = _detectionResult.value
+        if (current.status == DetectionStatus.NOT_DETECTED) return
+
+        // Initialize manual keypoints from current detection
+        if (manualKeypoints == null) {
+            manualKeypoints = current.detectedKeypoints.toMutableList()
+        }
+
+        // Update or add the specific keypoint
+        val idx = manualKeypoints!!.indexOfFirst { it.id == keypointId }
+        if (idx >= 0) {
+            manualKeypoints!![idx] = Keypoint(keypointId, imageX, imageY, 1.0f)
+        } else {
+            // New keypoint (e.g. far court KP1, KP5 added by user)
+            manualKeypoints!!.add(Keypoint(keypointId, imageX, imageY, 1.0f))
+        }
+
+        recomputeFromKeypoints()
+    }
+
+    /**
+     * Add far court doubles corners (KP1 left, KP5 right).
+     * Places them at default screen positions for user to drag into place.
+     */
+    fun addFarCourtPoints() {
+        val current = _detectionResult.value
+        if (current.status == DetectionStatus.NOT_DETECTED) return
+
+        if (manualKeypoints == null) {
+            manualKeypoints = current.detectedKeypoints.toMutableList()
+        }
+
+        // Find existing far court keypoints from projected
+        val projected = current.projectedKeypoints
+
+        // Use projected positions as initial placement (if available)
+        val kp1Projected = projected.find { it.id == 1 }
+        val kp5Projected = projected.find { it.id == 5 }
+
+        // Default: top-left and top-right of image if no projection
+        val kp1X = kp1Projected?.x ?: 200f
+        val kp1Y = kp1Projected?.y ?: 100f
+        val kp5X = kp5Projected?.x ?: 1080f
+        val kp5Y = kp5Projected?.y ?: 100f
+
+        // Add or update KP1 and KP5
+        fun addOrUpdate(id: Int, x: Float, y: Float) {
+            val idx = manualKeypoints!!.indexOfFirst { it.id == id }
+            if (idx >= 0) {
+                manualKeypoints!![idx] = Keypoint(id, x, y, 1.0f)
+            } else {
+                manualKeypoints!!.add(Keypoint(id, x, y, 1.0f))
+            }
+        }
+
+        addOrUpdate(1, kp1X, kp1Y)
+        addOrUpdate(5, kp5X, kp5Y)
+
+        _farCourtPointsAdded.value = true
+        recomputeFromKeypoints()
+    }
+
+    private fun recomputeFromKeypoints() {
+        val updatedKeypoints = manualKeypoints ?: return
+        val newH = homographyCalculator.computeHomography(updatedKeypoints) ?: return
+        val allProjected = projector.projectAllKeypoints(newH)
+        val validProjected = validator.filterValidProjections(
+            allProjected, updatedKeypoints, 1280, 720
+        )
+
+        _detectionResult.value = CourtDetectionResult(
+            detectedKeypoints = updatedKeypoints,
+            projectedKeypoints = validProjected,
+            homographyMatrix = newH,
+            reprojectionError = projector.computeReprojectionError(updatedKeypoints, newH),
+            inferenceTimeMs = 0,
+            status = DetectionStatus.DETECTED
+        )
+    }
+
+    fun setAdjustingKeypoint(id: Int?) {
+        _adjustingKeypointId.value = id
     }
 
     // --- Court Lock Controls ---
@@ -124,6 +240,9 @@ class CameraViewModel @Inject constructor(
         lockedDetectionResult = current
         _isCourtLockedFlow.value = true
         _cameraMovedAlert.value = false
+
+        // Release lens correction LUT (saves ~7MB)
+        lensCorrector.release()
 
         // Start gyroscope monitoring
         accumulatedRotation = 0f
@@ -298,6 +417,39 @@ class CameraViewModel @Inject constructor(
             ballMissFrameCount++
             emitKalmanPrediction()
         }
+
+        // Step 3: Bounce detection (only when court is locked)
+        if (isCourtLocked) {
+            checkBounce()
+        }
+    }
+
+    private fun checkBounce() {
+        val bouncePos = ballKalmanFilter.detectBounce() ?: return
+        val homography = lockedDetectionResult?.homographyMatrix ?: return
+
+        // Convert image coordinates to court coordinates
+        val courtCoord = homographyCalculator.imageToCourtCoordinate(
+            bouncePos.first, bouncePos.second, homography
+        ) ?: return
+
+        val isIn = ItfCourtSpec.isIn(courtCoord.first, courtCoord.second)
+
+        val spot = LandingSpot(
+            imageX = bouncePos.first,
+            imageY = bouncePos.second,
+            courtX = courtCoord.first,
+            courtY = courtCoord.second,
+            isIn = isIn
+        )
+
+        // Add to list, keep only recent N spots
+        val current = _landingSpots.value.toMutableList()
+        current.add(0, spot)
+        if (current.size > maxLandingSpots) {
+            current.removeAt(current.size - 1)
+        }
+        _landingSpots.value = current
     }
 
     private fun emitKalmanPrediction() {
@@ -342,7 +494,16 @@ class CameraViewModel @Inject constructor(
             }
 
             // --- UNLOCKED MODE: full pipeline ---
-            val bitmap = imageProxyToBitmap(imageProxy)
+            val rawBitmap = imageProxyToBitmap(imageProxy)
+
+            // Lens distortion correction (unlocked mode only)
+            val bitmap = if (shouldUndistort) {
+                val undistorted = lensCorrector.undistort(rawBitmap)
+                rawBitmap.recycle()
+                undistorted
+            } else {
+                rawBitmap
+            }
 
             // Pre-check: reject uniform/dark images
             if (!isImageUsable(bitmap)) {
@@ -351,7 +512,7 @@ class CameraViewModel @Inject constructor(
                 return
             }
 
-            // Ball detection (synchronous, preserves 3-frame temporal order)
+            // Ball detection (every frame)
             val ballResult = ballDetector.detect(bitmap, imageWidth, imageHeight)
             updateBallWithKalman(ballResult)
 
@@ -392,8 +553,8 @@ class CameraViewModel @Inject constructor(
 
             // Step 8: Determine status
             val status = when {
-                reprojError < 30f && validProjected.size >= 10 -> DetectionStatus.DETECTED
-                reprojError < 80f && validProjected.size >= 6 -> DetectionStatus.PARTIAL
+                reprojError < 25f && validProjected.size >= 10 -> DetectionStatus.DETECTED
+                reprojError < 50f && validProjected.size >= 8 -> DetectionStatus.PARTIAL
                 else -> DetectionStatus.NOT_DETECTED
             }
 

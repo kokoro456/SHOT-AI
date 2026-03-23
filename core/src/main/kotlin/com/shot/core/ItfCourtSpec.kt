@@ -106,4 +106,24 @@ object ItfCourtSpec {
         6 to 8,   // Far service line
         10 to 7,  // Center service line
     )
+
+    /** Check if court coordinate is within doubles court boundaries */
+    fun isInDoubles(courtX: Float, courtY: Float): Boolean {
+        return courtX >= 0f && courtX <= DOUBLES_WIDTH &&
+               courtY >= 0f && courtY <= COURT_LENGTH
+    }
+
+    /** Check if court coordinate is within singles court boundaries */
+    fun isInSingles(courtX: Float, courtY: Float): Boolean {
+        val singlesLeft = (DOUBLES_WIDTH - SINGLES_WIDTH) / 2f
+        val singlesRight = singlesLeft + SINGLES_WIDTH
+        return courtX >= singlesLeft && courtX <= singlesRight &&
+               courtY >= 0f && courtY <= COURT_LENGTH
+    }
+
+    /** Check if court coordinate is in (any part of ball touching line counts as in) */
+    fun isIn(courtX: Float, courtY: Float, ballRadiusM: Float = 0.0335f): Boolean {
+        return courtX >= -ballRadiusM && courtX <= DOUBLES_WIDTH + ballRadiusM &&
+               courtY >= -ballRadiusM && courtY <= COURT_LENGTH + ballRadiusM
+    }
 }

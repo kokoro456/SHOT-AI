@@ -40,6 +40,21 @@ class HomographyCalculator {
         return floatArrayOf(x, y)
     }
 
+    /**
+     * Convert image pixel coordinate to court coordinate (meters).
+     * Uses the inverse of the homography matrix.
+     * Returns Pair(courtX, courtY) or null if conversion fails.
+     */
+    fun imageToCourtCoordinate(imageX: Float, imageY: Float, homography: FloatArray): Pair<Float, Float>? {
+        val invH = invertHomography(homography) ?: return null
+        // Apply inverse homography: court = invH * image
+        val w = invH[6] * imageX + invH[7] * imageY + invH[8]
+        if (Math.abs(w) < 1e-10f) return null
+        val courtX = (invH[0] * imageX + invH[1] * imageY + invH[2]) / w
+        val courtY = (invH[3] * imageX + invH[4] * imageY + invH[5]) / w
+        return Pair(courtX, courtY)
+    }
+
     fun projectImageToCourt(imageX: Float, imageY: Float, h: FloatArray): FloatArray {
         val w = h[6] * imageX + h[7] * imageY + h[8]
         if (Math.abs(w) < 1e-10f) return floatArrayOf(Float.NaN, Float.NaN)
