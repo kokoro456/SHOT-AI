@@ -48,3 +48,12 @@ Thumbs.db
 # Environment
 .env
 *.log
+
+# Large files
+park/
+*.mp4
+phone ball data/
+*.zip
+v3/
+yolo output/
+
